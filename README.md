@@ -13,9 +13,9 @@ If you have any questions or just wanna do something cool - CONTACT me ;)
 Contents
 
 - vision
-  - [e2style](notebooks/vision/e2style/README.md)
+  - [e2style](vision/e2style/README.md)
 - audio
-  - [nuwave2](notebooks/audio/nuwave2/README.md)
+  - [nuwave2](audio/nuwave2/README.md)
 
 
 ---
