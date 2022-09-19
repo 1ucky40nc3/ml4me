@@ -1,7 +1,6 @@
-# ml4me
-a collection of my personal ml experiments
+# ml4me - a collection of my ml experiments
+
 ---
-MIT License
 
 This repository is a means of organizing my machine-learning experiments.
 You will find code, notebooks and text among other stuff.
