@@ -1,0 +1,3 @@
+datasets==2.4.0
+evaluate==0.2.2
+wandb==0.13.3
