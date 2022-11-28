@@ -337,10 +337,11 @@ def get_dataset_info(
     return is_regression, num_labels, label_list
 
 
-def get_max(value: Optional[int], dataset: Dataset) -> int:
-    if not value:
+def evaluate_max(max_length: Optional[int], dataset: Dataset) -> int:
+    '''Evaluate if the value or the dataset length shall be returned'''
+    if not max_length:
         return len(dataset)
-    return min(value, len(dataset))
+    return min(max_length, len(dataset))
 
 
 def preprocess_datasets(
@@ -449,7 +450,7 @@ def preprocess_datasets(
 
         train_dataset = dataset['train']
         if data_args.max_train_samples:
-            max_train_samples = get_max(data_args.max_train_samples, train_dataset)
+            max_train_samples = evaluate_max(data_args.max_train_samples, train_dataset)
             train_dataset = train_dataset.select(range(max_train_samples))
     
     if train_args.do_eval:
@@ -457,7 +458,7 @@ def preprocess_datasets(
             if key in dataset:
                 eval_dataset = dataset[key]
                 if data_args.max_eval_samples is not None:
-                    max_eval_samples = get_max(data_args.max_eval_samples, eval_dataset)
+                    max_eval_samples = evaluate_max(data_args.max_eval_samples, eval_dataset)
                     eval_dataset = eval_dataset.select(range(max_eval_samples))
                 
                 eval_datasets.append(eval_dataset)
@@ -474,7 +475,7 @@ def preprocess_datasets(
             if key in dataset:
                 test_dataset = dataset[key]
                 if data_args.max_predict_samples is not None:
-                    max_predict_samples = get_max(data_args.max_predict_samples, test_dataset)
+                    max_predict_samples = evaluate_max(data_args.max_predict_samples, test_dataset)
                     test_dataset = test_dataset.select(range(max_predict_samples))
                 
                 test_datasets.append(test_dataset)
@@ -495,44 +496,33 @@ def interpret_predictions(
     return np.argmax(prediction, axis=1)
 
 
-def load_metric(
+def load_metrics(
     data_args: Dataclass,
     is_regression: bool
 ) -> Callable[[transformers.EvalPrediction], Dict[str, Any]]:
     '''Load a metric and return a `compute_metrics` function.'''
     if data_args.task_name:
         metric = evaluate.load('glue', data_args.task_name)
+    elif is_regression:
+        metric = evaluate.load('mse')
     else:
         metric = evaluate.load('accuracy')
     
-    def fn(p: transformers.EvalPrediction) -> Dict[str, Any]:
-        preds = p.predictions
-        if isinstance(preds, tuple):
-            preds = preds[0]
-
-        preds = interpret_predictions(preds, is_regression)
+    def compute_metrics(
+        eval_prediction: transformers.EvalPrediction
+    ) -> Dict[str, Any]:
+        '''A function which computes metrics.'''
+        predictions = eval_prediction.predictions
+        if isinstance(predictions, tuple):
+            predictions = predictions[0]
+        predictions = interpret_predictions(predictions, is_regression)
         
-        if data_args.task_name:
-            result = metric.compute(
-                predictions=preds,
-                references=p.label_ids
-            )
-            if len(result) > 1:
-                val = list(result.values())
-                val = np.mean(val).item()
-                result['combined_score'] = val
-            return result
-        elif is_regression:
-            val = (preds - p.label_ids) ** 2
-            val = val.mean().item()
-            return dict(mse=val)
-        else:
-            val = preds == p.label_ids
-            val = val.astype(np.float32)
-            val = val.mean().item()
-            return dict(accuracy=val)
+        return metric.compute(
+            predictions=predictions, 
+            references=eval_prediction.label_ids
+        )
 
-    return fn
+    return compute_metrics
 
 
 def load_collator(
@@ -578,27 +568,28 @@ def main():
         raw_datasets,
     )
 
-    kwargs = dict(
-        cache_dir=model_args.cache_dir,
-        revision=model_args.revision,
-        use_auth_token=model_args.use_auth_token,
-    )
     config = transformers.AutoConfig.from_pretrained(
         model_args.config_name or model_args.model_name_or_path,
         num_labels=num_labels,
         finetuning_task=data_args.task_name,
-        **kwargs,
+        cache_dir=model_args.cache_dir,
+        revision=model_args.revision,
+        use_auth_token=model_args.use_auth_token,
     )
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_args.tokenizer_name or model_args.model_name_or_path,
         use_fast=model_args.use_fast_tokenizer,
-        **kwargs
+        cache_dir=model_args.cache_dir,
+        revision=model_args.revision,
+        use_auth_token=model_args.use_auth_token,
     )
     model = transformers.AutoModelForSequenceClassification.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool('.ckpt' in model_args.model_name_or_path),
         ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
-        **kwargs
+        cache_dir=model_args.cache_dir,
+        revision=model_args.revision,
+        use_auth_token=model_args.use_auth_token,
     )
 
     train_dataset, eval_datasets, predict_datasets = preprocess_datasets(
@@ -618,7 +609,7 @@ def main():
         tokenizer
     )
 
-    compute_metrics = load_metric(data_args, is_regression)
+    compute_metrics = load_metrics(data_args, is_regression)
 
     trainer = transformers.Trainer(
         model=model,
@@ -631,7 +622,6 @@ def main():
     )
 
     if train_args.do_train:
-        # Try to find a last checkpoint
         resume_from_checkpoint = detect_last_checkpoint(train_args)
         if train_args.resume_from_checkpoint:
             resume_from_checkpoint = train_args.resume_from_checkpoint
@@ -640,7 +630,7 @@ def main():
         train_result = trainer.train(resume_from_checkpoint)
         
         metrics = train_result.metrics
-        max_train_samples = get_max(data_args.max_train_samples, train_dataset)
+        max_train_samples = evaluate_max(data_args.max_train_samples, train_dataset)
         metrics['train_samples'] = max_train_samples
 
         # Save the model and the tokenizer.
@@ -658,7 +648,7 @@ def main():
         for i, eval_dataset in enumerate(eval_datasets):
             metrics = trainer.evaluate(eval_dataset)
 
-            max_eval_samples = get_max(data_args.max_eval_samples, eval_dataset)
+            max_eval_samples = evaluate_max(data_args.max_eval_samples, eval_dataset)
             metrics['eval_samples'] = max_eval_samples
 
             if i > 0:
@@ -700,8 +690,8 @@ def main():
                 df.to_csv(output_predict_file, sep='\t')
     
     kwargs = {
-        'finetuned_from': model_args.model_name_or_path,
-        'tasks': 'text-classification'
+        'tasks': 'text-classification',
+        'finetuned_from': model_args.model_name_or_path
     }
     if data_args.task_name:
         kwargs['language'] = 'en'
@@ -709,7 +699,6 @@ def main():
         kwargs['dataset_args'] = data_args.task_name
         kwargs['dataset'] = f'GLUE {data_args.task_name.upper}'
 
-    
     if train_args.push_to_hub:
         trainer.push_to_hub(**kwargs)
     else:
