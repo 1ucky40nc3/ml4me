@@ -309,7 +309,7 @@ def load_raw_datasets(
     return raw_datasets
 
 
-def label_info(
+def get_dataset_info(
     dataset: Dataset,
     data_args: Dataclass
 ) -> Tuple[bool, int, List[int]]:
@@ -485,7 +485,7 @@ def preprocess_datasets(
     return train_dataset, eval_datasets, test_datasets
 
 
-def interpret_prediction(
+def interpret_predictions(
     prediction: torch.Tensor,
     is_regression: bool
 ) -> torch.Tensor:
@@ -510,10 +510,7 @@ def load_metric(
         if isinstance(preds, tuple):
             preds = preds[0]
 
-        if is_regression:
-            preds = np.squeeze(preds)
-        else:
-            preds = np.argmax(preds, axis=1)
+        preds = interpret_predictions(preds, is_regression)
         
         if data_args.task_name:
             result = metric.compute(
@@ -576,7 +573,7 @@ def main():
         model_args,
         train_args,
     )
-    is_regression, num_labels, label_list = label_info(
+    is_regression, num_labels, label_list = get_dataset_info(
         data_args, 
         raw_datasets,
     )
@@ -683,14 +680,41 @@ def main():
                 metric_key_prefix='predict'
             )
             predictions = predict_output.predictions
-            if is_regression:
-                predictions = np.squeeze(predictions)
-            else:
-                predictions = np.argmax(predictions, axis=1)
+            predictions = interpret_predictions(predictions, is_regression)
             
+            task = data_args.task if i < 1 else 'mnli-mm'
             output_predict_file = os.path.join(
                 train_args.output_dir,
-                'predict_results_')
+                f'predict_results_{task}.csv'
+            )
+            if trainer.is_world_process_zero():
+                df = predict_dataset.to_pandas()
+
+                # Map the predictions with the label list
+                predictions = predictions.tolist()
+                id_to_label = lambda i: label_list[i]
+                predictions = map(id_to_label, predictions)
+                predictions = list(predictions)
+                df['preds'] = predictions
+
+                df.to_csv(output_predict_file, sep='\t')
+    
+    kwargs = {
+        'finetuned_from': model_args.model_name_or_path,
+        'tasks': 'text-classification'
+    }
+    if data_args.task_name:
+        kwargs['language'] = 'en'
+        kwargs['dataset_tags'] = 'glue'
+        kwargs['dataset_args'] = data_args.task_name
+        kwargs['dataset'] = f'GLUE {data_args.task_name.upper}'
+
+    
+    if train_args.push_to_hub:
+        trainer.push_to_hub(**kwargs)
+    else:
+        trainer.create_model_card(**kwargs)
+
 
 if __name__ == '__main__':
     main()
