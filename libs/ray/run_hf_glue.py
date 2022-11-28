@@ -645,8 +645,7 @@ def main():
     if train_args.do_eval:
         logger.info('*** Evaluate ***')
 
-        if data_args.task_name == 'mnli':
-            combined = {}
+        combined = {}
 
         for i, eval_dataset in enumerate(eval_datasets):
             metrics = trainer.evaluate(eval_dataset)
@@ -655,12 +654,13 @@ def main():
             metrics['eval_samples'] = max_eval_samples
 
             if i > 0:
+                # Only the mlni dataset has two eval datasets.(validation & validation_mismatched)
+                # Mark the metrics of the validation_mismatched dataset with the `_mm` suffix.
                 metrics = {f'{k}_mm': v for k, v in metrics.items()}
-            if data_args.task_name == 'mnli':
-                combined.update(metrics)
+            combined.update(metrics)
 
-            trainer.log_metrics('eval', metrics)
-            trainer.save_metrics('eval', combined if data_args.task_name == 'mnli' else metrics)
+            trainer.log_metrics('eval', combined)
+            trainer.save_metrics('eval', combined)
 
     if train_args.do_predict:
         logger.info('*** Predict ***')
