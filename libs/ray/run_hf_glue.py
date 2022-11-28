@@ -10,7 +10,6 @@ from typing import (
 
 import os
 import sys
-import random
 import logging
 from dataclasses import (
     dataclass,
@@ -18,6 +17,8 @@ from dataclasses import (
 )
 
 import numpy as np
+
+import torch
 
 import datasets
 import evaluate
@@ -484,6 +485,16 @@ def preprocess_datasets(
     return train_dataset, eval_datasets, test_datasets
 
 
+def interpret_prediction(
+    prediction: torch.Tensor,
+    is_regression: bool
+) -> torch.Tensor:
+    '''Interpret a prediction based on the task nature.'''
+    if is_regression:
+        return np.squeeze(prediction)
+    return np.argmax(prediction, axis=1)
+
+
 def load_metric(
     data_args: Dataclass,
     is_regression: bool
@@ -667,10 +678,11 @@ def main():
 
         for predict_dataset in predict_datasets:
             predict_dataset = predict_dataset.remove_columns('label')
-            predictions = trainer.predict(
+            predict_output = trainer.predict(
                 predict_dataset,
                 metric_key_prefix='predict'
-            ).predictions
+            )
+            predictions = predict_output.predictions
             if is_regression:
                 predictions = np.squeeze(predictions)
             else:
