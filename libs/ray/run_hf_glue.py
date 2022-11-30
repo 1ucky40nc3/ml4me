@@ -138,7 +138,7 @@ class DataArguments:
     sentence2_key: Optional[str] = argument(
         help='A optional name for the second sentence.'
     )
-    overwrite_cache = bool = argument(
+    overwrite_cache: bool = argument(
         default=False,
         help='State if cached dataset files shall be overwritten.'
     )
