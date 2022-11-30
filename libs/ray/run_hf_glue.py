@@ -581,11 +581,11 @@ def main():
     raw_datasets = load_raw_datasets(
         data_args,
         model_args,
-        train_args,
+        train_args
     )
     is_regression, num_labels, label_list = get_dataset_info(
-        data_args, 
         raw_datasets,
+        data_args 
     )
 
     config = transformers.AutoConfig.from_pretrained(
