@@ -415,7 +415,7 @@ def preprocess_datasets(
                 'Model pretrained with mismatched labels.'
                 f' The pretrained labels {label_names}'
                 f" don't match with the labels {sorted_label_list}."
-                f' As a consequence the new labels will be ignored.'
+                f' As a consequence the model labels will be ignored.'
             )
     elif not data_args.task_name and not is_regression:
         label_to_id = {v: i for i, v in enumerate(label_list)}
