@@ -454,7 +454,7 @@ def preprocess_datasets(
                 (label_to_id[l] if l != -1 else -1)
                 for l in examples['label']
             ]
-        return
+        return result
     
     with train_args.main_process_first(desc='dataset map pre-processing'):
         dataset = dataset.map(
