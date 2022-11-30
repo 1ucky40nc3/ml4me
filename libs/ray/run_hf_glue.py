@@ -212,7 +212,7 @@ class ModelArguments:
             ' By default this path is "~/.cache/huggingface".'
         )
     )
-    model_revision: str = argument(
+    revision: str = argument(
         default='main',
         help=(
             'A model version that shall be used.'
