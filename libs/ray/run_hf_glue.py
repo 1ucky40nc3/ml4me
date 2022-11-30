@@ -692,7 +692,7 @@ def main():
             predictions = predict_output.predictions
             predictions = interpret_predictions(predictions, is_regression)
             
-            # Only the MNLI dataset has two tasks.
+            # Only the MNLI dataset has two tasks
             task_name = data_args.task_name if i < 1 else 'mnli-mm'
             output_predict_file = os.path.join(
                 train_args.output_dir,
@@ -700,6 +700,8 @@ def main():
             )
             if trainer.is_world_process_zero():
                 df = predict_dataset.to_pandas()
+                # Remove an unnamed column that is automatically generated
+                df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
 
                 # Map the predictions with the label list
                 predictions = predictions.tolist()
