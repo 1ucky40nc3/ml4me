@@ -692,10 +692,11 @@ def main():
             predictions = predict_output.predictions
             predictions = interpret_predictions(predictions, is_regression)
             
-            task = data_args.task if i < 1 else 'mnli-mm'
+            # Only the MNLI dataset has two tasks.
+            task_name = data_args.task_name if i < 1 else 'mnli-mm'
             output_predict_file = os.path.join(
                 train_args.output_dir,
-                f'predict_results_{task}.csv'
+                f'predict_results_{task_name}.csv'
             )
             if trainer.is_world_process_zero():
                 df = predict_dataset.to_pandas()
