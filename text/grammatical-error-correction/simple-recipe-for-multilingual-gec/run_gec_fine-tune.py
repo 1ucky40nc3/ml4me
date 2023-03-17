@@ -150,13 +150,13 @@ class DataTrainingArguments:
     dataset_config_name: Optional[str] = field(
         default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
     )
-    text_column: Optional[str] = field(
+    source_column: Optional[str] = field(
         default=None,
-        metadata={"help": "The name of the column in the datasets containing the full texts (for summarization)."},
+        metadata={"help": "The name of the column in the datasets containing the source texts (for gec)."},
     )
-    summary_column: Optional[str] = field(
+    target_column: Optional[str] = field(
         default=None,
-        metadata={"help": "The name of the column in the datasets containing the summaries (for summarization)."},
+        metadata={"help": "The name of the column in the datasets containing the target texts (for gec)."},
     )
     train_file: Optional[str] = field(
         default=None, metadata={"help": "The input training data file (a jsonlines or csv file)."}
@@ -384,8 +384,8 @@ def main():
     # or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
     # (the dataset will be downloaded automatically from the datasets Hub).
     #
-    # For CSV/JSON files this script will use the first column for the full texts and the second column for the
-    # summaries (unless you specify column names for this with the `text_column` and `summary_column` arguments).
+    # For CSV/JSON files this script will use the first column for the source texts and the second column for the
+    # targets (unless you specify column names for this with the `source_column` and `target_column` arguments).
     #
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
@@ -510,21 +510,21 @@ def main():
 
     # Get the column names for input/target.
     dataset_columns = summarization_name_mapping.get(data_args.dataset_name, None)
-    if data_args.text_column is None:
-        text_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
+    if data_args.source_column is None:
+        source_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
     else:
-        text_column = data_args.text_column
-        if text_column not in column_names:
+        source_column = data_args.source_column
+        if source_column not in column_names:
             raise ValueError(
-                f"--text_column' value '{data_args.text_column}' needs to be one of: {', '.join(column_names)}"
+                f"--source_column' value '{data_args.source_column}' needs to be one of: {', '.join(column_names)}"
             )
-    if data_args.summary_column is None:
-        summary_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
+    if data_args.target_column is None:
+        target_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
     else:
-        summary_column = data_args.summary_column
-        if summary_column not in column_names:
+        target_column = data_args.target_column
+        if target_column not in column_names:
             raise ValueError(
-                f"--summary_column' value '{data_args.summary_column}' needs to be one of: {', '.join(column_names)}"
+                f"--target_column' value '{data_args.target_column}' needs to be one of: {', '.join(column_names)}"
             )
 
     # Temporarily set max_target_length for training.
@@ -541,10 +541,10 @@ def main():
         # remove pairs where at least one record is None
 
         inputs, targets = [], []
-        for i in range(len(examples[text_column])):
-            if examples[text_column][i] and examples[summary_column][i]:
-                inputs.append(examples[text_column][i])
-                targets.append(examples[summary_column][i])
+        for i in range(len(examples[source_column])):
+            if examples[source_column][i] and examples[target_column][i]:
+                inputs.append(examples[source_column][i])
+                targets.append(examples[target_column][i])
 
         inputs = [prefix + inp for inp in inputs]
         model_inputs = tokenizer(inputs, max_length=data_args.max_source_length, padding=padding, truncation=True)
