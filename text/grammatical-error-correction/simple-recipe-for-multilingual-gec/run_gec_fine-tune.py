@@ -69,8 +69,7 @@ from transformers import (
     set_seed,
 )
 from transformers.trainer_utils import get_last_checkpoint
-from transformers.utils import check_min_version, is_offline_mode, send_example_telemetry
-from transformers.utils.versions import require_version
+from transformers.utils import is_offline_mode
 
 
 logger = logging.getLogger(__name__)
@@ -129,7 +128,7 @@ class ModelArguments:
         default=None,
         metadata={
             "help": (
-                "Whether to automatically resize the position embeddings if `max_source_length` exceeds "
+                "Whether to automatically resize the position embeddings if `max_length` exceeds "
                 "the model's position embeddings."
             )
         },
@@ -142,7 +141,7 @@ class DataTrainingArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
-    lang: Optional[str] = field(default=None, metadata={"help": "Language id for summarization."})
+    lang: Optional[str] = field(default=None, metadata={"help": "Language id for grammatical error correction."})
 
     dataset_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
@@ -182,7 +181,7 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "The number of processes to use for the preprocessing."},
     )
-    max_source_length: Optional[int] = field(
+    max_length: Optional[int] = field(
         default=1024,
         metadata={
             "help": (
@@ -191,21 +190,12 @@ class DataTrainingArguments:
             )
         },
     )
-    max_target_length: Optional[int] = field(
-        default=128,
-        metadata={
-            "help": (
-                "The maximum total sequence length for target text after tokenization. Sequences longer "
-                "than this will be truncated, sequences shorter will be padded."
-            )
-        },
-    )
-    val_max_target_length: Optional[int] = field(
+    val_max_length: Optional[int] = field(
         default=None,
         metadata={
             "help": (
                 "The maximum total sequence length for validation target text after tokenization. Sequences longer "
-                "than this will be truncated, sequences shorter will be padded. Will default to `max_target_length`."
+                "than this will be truncated, sequences shorter will be padded. Will default to `max_length`."
                 "This argument is also used to override the ``max_length`` param of ``model.generate``, which is used "
                 "during ``evaluate`` and ``predict``."
             )
@@ -288,24 +278,8 @@ class DataTrainingArguments:
             if self.validation_file is not None:
                 extension = self.validation_file.split(".")[-1]
                 assert extension in ["csv", "json"], "`validation_file` should be a csv or a json file."
-        if self.val_max_target_length is None:
-            self.val_max_target_length = self.max_target_length
-
-
-summarization_name_mapping = {
-    "amazon_reviews_multi": ("review_body", "review_title"),
-    "big_patent": ("description", "abstract"),
-    "cnn_dailymail": ("article", "highlights"),
-    "orange_sum": ("text", "summary"),
-    "pn_summary": ("article", "summary"),
-    "psc": ("extract_text", "summary_text"),
-    "samsum": ("dialogue", "summary"),
-    "thaisum": ("body", "summary"),
-    "xglue": ("news_body", "news_title"),
-    "xsum": ("document", "summary"),
-    "wiki_summary": ("article", "highlights"),
-    "multi_news": ("document", "summary"),
-}
+        if self.val_max_length is None:
+            self.val_max_length = self.max_length
 
 
 def main():
@@ -320,10 +294,6 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
-    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
-    # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_summarization", model_args, data_args)
 
     # Setup logging
     logging.basicConfig(
@@ -359,7 +329,7 @@ def main():
     ]:
         logger.warning(
             "You're running a t5 model but didn't provide a source prefix, which is the expected, e.g. with "
-            "`--source_prefix 'summarize: ' `"
+            "`--source_prefix 'correct: ' `"
         )
 
     # Detecting last checkpoint.
@@ -461,21 +431,21 @@ def main():
 
     if (
         hasattr(model.config, "max_position_embeddings")
-        and model.config.max_position_embeddings < data_args.max_source_length
+        and model.config.max_position_embeddings < data_args.max_length
     ):
         if model_args.resize_position_embeddings is None:
             logger.warning(
                 "Increasing the model's number of position embedding vectors from"
-                f" {model.config.max_position_embeddings} to {data_args.max_source_length}."
+                f" {model.config.max_position_embeddings} to {data_args.max_length}."
             )
-            model.resize_position_embeddings(data_args.max_source_length)
+            model.resize_position_embeddings(data_args.max_length)
         elif model_args.resize_position_embeddings:
-            model.resize_position_embeddings(data_args.max_source_length)
+            model.resize_position_embeddings(data_args.max_length)
         else:
             raise ValueError(
-                f"`--max_source_length` is set to {data_args.max_source_length}, but the model only has"
+                f"`--max_length` is set to {data_args.max_length}, but the model only has"
                 f" {model.config.max_position_embeddings} position encodings. Consider either reducing"
-                f" `--max_source_length` to {model.config.max_position_embeddings} or to automatically resize the"
+                f" `--max_length` to {model.config.max_position_embeddings} or to automatically resize the"
                 " model's position encodings by passing `--resize_position_embeddings`."
             )
 
@@ -509,9 +479,8 @@ def main():
         model.config.forced_bos_token_id = forced_bos_token_id
 
     # Get the column names for input/target.
-    dataset_columns = summarization_name_mapping.get(data_args.dataset_name, None)
     if data_args.source_column is None:
-        source_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
+        source_column = column_names[0]
     else:
         source_column = data_args.source_column
         if source_column not in column_names:
@@ -519,7 +488,7 @@ def main():
                 f"--source_column' value '{data_args.source_column}' needs to be one of: {', '.join(column_names)}"
             )
     if data_args.target_column is None:
-        target_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
+        target_column = column_names[1]
     else:
         target_column = data_args.target_column
         if target_column not in column_names:
@@ -527,8 +496,8 @@ def main():
                 f"--target_column' value '{data_args.target_column}' needs to be one of: {', '.join(column_names)}"
             )
 
-    # Temporarily set max_target_length for training.
-    max_target_length = data_args.max_target_length
+    # Temporarily set max_length for training.
+    max_length = data_args.max_length
     padding = "max_length" if data_args.pad_to_max_length else False
 
     if training_args.label_smoothing_factor > 0 and not hasattr(model, "prepare_decoder_input_ids_from_labels"):
@@ -547,10 +516,10 @@ def main():
                 targets.append(examples[target_column][i])
 
         inputs = [prefix + inp for inp in inputs]
-        model_inputs = tokenizer(inputs, max_length=data_args.max_source_length, padding=padding, truncation=True)
+        model_inputs = tokenizer(inputs, max_length=data_args.max_length, padding=padding, truncation=True)
 
         # Tokenize targets with the `text_target` keyword argument
-        labels = tokenizer(text_target=targets, max_length=max_target_length, padding=padding, truncation=True)
+        labels = tokenizer(text_target=targets, max_length=max_length, padding=padding, truncation=True)
 
         # If we are padding here, replace all tokenizer.pad_token_id in the labels by -100 when we want to ignore
         # padding in the loss.
@@ -580,7 +549,7 @@ def main():
             )
 
     if training_args.do_eval:
-        max_target_length = data_args.val_max_target_length
+        max_length = data_args.val_max_length
         if "validation" not in raw_datasets:
             raise ValueError("--do_eval requires a validation dataset")
         eval_dataset = raw_datasets["validation"]
@@ -598,7 +567,7 @@ def main():
             )
 
     if training_args.do_predict:
-        max_target_length = data_args.val_max_target_length
+        max_length = data_args.val_max_length
         if "test" not in raw_datasets:
             raise ValueError("--do_predict requires a test dataset")
         predict_dataset = raw_datasets["test"]
@@ -660,7 +629,7 @@ def main():
     training_args.generation_max_length = (
         training_args.generation_max_length
         if training_args.generation_max_length is not None
-        else data_args.val_max_target_length
+        else data_args.val_max_length
     )
     training_args.generation_num_beams = (
         data_args.num_beams if data_args.num_beams is not None else training_args.generation_num_beams
@@ -731,7 +700,7 @@ def main():
                 with open(output_prediction_file, "w") as writer:
                     writer.write("\n".join(predictions))
 
-    kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "summarization"}
+    kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "grammatical-error-correction"}
     if data_args.dataset_name is not None:
         kwargs["dataset_tags"] = data_args.dataset_name
         if data_args.dataset_config_name is not None:
