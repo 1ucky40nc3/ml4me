@@ -657,7 +657,7 @@ def main():
 
     # Initialize our Trainer
     trainer = Seq2SeqTrainer(
-        model=model,
+        model=model if not hp_search_args.do_search else None,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train or hp_search_args.do_search else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
