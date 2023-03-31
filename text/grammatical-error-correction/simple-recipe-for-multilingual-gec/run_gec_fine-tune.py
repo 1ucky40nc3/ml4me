@@ -95,11 +95,11 @@ class HPSearchArguments:
     Arguments pertaining to the hyperparameter search
     """
 
-    do_search: bool = field(
-        default=False, metadata={"help": "Whether to run a hyperparameter search."}
-    )
     search_space_path: str = field(
         metadata={"help": "Path to search space file in wand format."}
+    )
+    do_search: bool = field(
+        default=False, metadata={"help": "Whether to run a hyperparameter search."}
     )
     num_trials: int = field(
         default=20, metadata={"help": "Number of trails during hyperparameter search."}
