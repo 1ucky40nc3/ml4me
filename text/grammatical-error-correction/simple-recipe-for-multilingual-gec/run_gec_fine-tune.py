@@ -95,8 +95,8 @@ class HPSearchArguments:
     Arguments pertaining to the hyperparameter search
     """
 
-    search_space_path: str = field(
-        metadata={"help": "Path to search space file in wand format."}
+    search_space_path: Optional[str] = field(
+        default=None, metadata={"help": "Path to search space file in wand format."}
     )
     do_search: bool = field(
         default=False, metadata={"help": "Whether to run a hyperparameter search."}
