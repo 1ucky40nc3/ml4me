@@ -43,6 +43,7 @@ Fine-tuning the transformers models for the sequence to sequence grammatical err
 import logging
 import os
 import sys
+import json
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -86,6 +87,23 @@ except (LookupError, OSError):
 
 # A list of all multilingual tokenizer which require lang attribute.
 MULTILINGUAL_TOKENIZERS = [MBartTokenizer, MBartTokenizerFast, MBart50Tokenizer, MBart50TokenizerFast]
+
+
+@dataclass
+class HPSearchArguments:
+    """
+    Arguments pertaining to the hyperparameter search
+    """
+
+    do_search: bool = field(
+        default=False, metadata={"help": "Whether to run a hyperparameter search."}
+    )
+    search_space_path: str = field(
+        metadata={"help": "Path to search space file in wand format."}
+    )
+    num_trials: int = field(
+        default=20, metadata={"help": "Number of trails during hyperparameter search."}
+    )
 
 
 @dataclass
@@ -287,13 +305,13 @@ def main():
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, Seq2SeqTrainingArguments))
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, HPSearchArguments, Seq2SeqTrainingArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, hp_search_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+        model_args, data_args, hp_search_args, training_args = parser.parse_args_into_dataclasses()
 
     # Setup logging
     logging.basicConfig(
@@ -405,14 +423,16 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-    model = AutoModelForSeq2SeqLM.from_pretrained(
-        model_args.model_name_or_path,
-        from_tf=bool(".ckpt" in model_args.model_name_or_path),
-        config=config,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
-    )
+    def model_init(trail):
+        return AutoModelForSeq2SeqLM.from_pretrained(
+            model_args.model_name_or_path,
+            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            config=config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=True if model_args.use_auth_token else None,
+        )
+    model = model_init(None)
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
@@ -531,7 +551,7 @@ def main():
         model_inputs["labels"] = labels["input_ids"]
         return model_inputs
 
-    if training_args.do_train:
+    if training_args.do_train or hp_search_args.do_search:
         if "train" not in raw_datasets:
             raise ValueError("--do_train requires a train dataset")
         train_dataset = raw_datasets["train"]
@@ -644,10 +664,32 @@ def main():
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics if training_args.predict_with_generate else None,
+        model_init=model_init if hp_search_args.do_search else None
     )
 
-    # Training
-    if training_args.do_train:
+    if hp_search_args.do_search:
+        # Hyperparameter search
+        checkpoint = None
+        if training_args.resume_from_checkpoint is not None:
+            checkpoint = training_args.resume_from_checkpoint
+        elif last_checkpoint is not None:
+            checkpoint = last_checkpoint
+
+        # Load the search space from the JSON file
+        with open(hp_search_args.search_space_path, 'r', encoding='utf-8') as f:
+            search_space = json.load(f)
+
+        def wandb_hp_space(trial):
+            return search_space
+    
+        trainer.hyperparameter_search(
+            direction="maximize",
+            backend="wandb",
+            hp_space=wandb_hp_space,
+            n_trials=hp_search_args.num_trials,
+        )
+    elif training_args.do_train:
+        # Training
         checkpoint = None
         if training_args.resume_from_checkpoint is not None:
             checkpoint = training_args.resume_from_checkpoint
