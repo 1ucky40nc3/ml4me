@@ -652,6 +652,58 @@ def load_data(
     )
 
 
+def get_global_step(path: str) -> int:
+    '''Get the global step from the checkpoint name.
+
+    Args:
+        path: The path of the checkpoint directory.
+              The directory name follows the f"step_{step}" format.
+
+    Returns:
+        The global step as saved in the directory name.
+    '''
+    basename = os.path.basename(path)
+    filename, _ = os.path.splitext(basename)
+    global_step = int(filename.replace('step_', ''))
+    return global_step
+
+
+
+
+
+def maybe_save(
+    training_args: transformers.TrainingArguments, 
+    accelerator: accelerate.Accelerator,
+    global_step: int,
+) -> None:
+    '''Maybe save if conditions are met.
+
+    Check if the `training_args.save_strategy` and `training_args.save_steps`
+    specify conditions that are met at the current `global_step`.
+
+    Args:
+        training_args: A `transformers.TrainingArguments` object.
+        accelerator: Our current accelerator object.
+        global_step: The current global training step.
+        num_update_steps_per_epoch: The number of update steps of each training epoch.
+    '''
+    if (
+        training_args.save_strategy == 'steps'
+        and training_args.save_steps % global_step == 0
+    ):
+        if training_args.save_total_limit is not None:
+            # Only keep the latest `training_args.save_total_limit` number of checkpoints
+            all_saves = glob.glob(os.path.join(training_args.output_dir, r'steps_\d'))
+            all_saves.sort()
+            if len(all_saves) > training_args.save_total_limit:
+                num_delete = len(all_saves) - training_args.save_total_limit
+                for save_dir in all_saves[:num_delete]:
+                    shutil.rmtree(save_dir)
+
+        save_dir = os.path.join(training_args.output_dir, f'steps_{global_step}')
+        accelerator.save_state(accelerator)
+
+
 def train_fn(
     model_args: ModelArguments,
     data_args: DataArguments,
@@ -707,7 +759,8 @@ def train_fn(
 
         noise_scheduler = load_noise_scheduler(model_args)
 
-        num_update_steps_per_epoch = max(math.ceil(len(train_dataloader) / gradient_accumulation_steps), 1)
+        num_steps_per_epoch = len(train_dataloader)
+        num_update_steps_per_epoch = max(math.ceil(num_steps_per_epoch / gradient_accumulation_steps), 1)
         if training_args.max_steps > 0:
             max_steps = training_args.max_steps
             num_train_epochs = max_steps // num_update_steps_per_epoch + int(max_steps // num_update_steps_per_epoch > 0)
@@ -730,29 +783,19 @@ def train_fn(
             f"  Number of trainable parameters = {sum(p.numel() for p in text_encoder.get_input_embeddings().parameters().parameters() if p.requires_grad)}"
         )
 
-        state = transformers.TrainerState(
-            is_local_process_zero=accelerator.is_local_main_process,
-            is_world_process_zero=accelerator.is_main_process
-        )
-        state.epoch = 0
         start_time = time.time()
-        epochs_trained = 0
-        steps_trained_in_current_epoch = 0
+        global_step = 0
         skip_first_batches = False
         steps_trained_progress_bar = None
 
-        trainer_state_path = os.path.join(training_args.resume_from_checkpoint, TRAINER_STATE_NAME)
-        if (
-            training_args.resume_from_checkpoint is not None
-            and os.path.isfile(trainer_state_path)
-        ):
-            state = transformers.TrainerState.load_from_json(trainer_state_path)
-            epochs_trained = state.global_step // num_update_steps_per_epoch
-            steps_trained_in_current_epoch = (state.global_step % num_update_steps_per_epoch) * gradient_accumulation_steps
-            skip_first_batches = True
+        if training_args.resume_from_checkpoint is not None:
+            accelerator.load_state(training_args.resume_from_checkpoint)
+            global_step = get_global_step(training_args.resume_from_checkpoint)
+            epochs_trained = global_step // num_update_steps_per_epoch
+            steps_trained_in_current_epoch = (global_step % num_update_steps_per_epoch) * gradient_accumulation_steps
             logger.info('  Continuing training from checkpoint, will skip to saved global_step')
             logger.info(f'  Continuing training from epoch {epochs_trained}')
-            logger.info(f'  Continuing training from global step {state.global_step}')
+            logger.info(f'  Continuing training from global step {global_step}')
             logger.info(
                 f'  Will skip the first {epochs_trained} epochs then the first'
                 f' {steps_trained_in_current_epoch} batches in the first epoch.'
@@ -764,17 +807,13 @@ def train_fn(
             for epoch in range(epochs_trained):
                 _ = list(train_dataloader.sampler)
 
-        state.max_steps = max_steps
-        state.num_train_epochs = num_train_epochs
-        state.is_local_process_zero = accelerator.is_local_main_process,
-        state.is_world_process_zero=accelerator.is_main_process
-
-        for epoch in range(epochs_trained, num_train_epochs):
+        for _ in range(epochs_trained, num_train_epochs):
             if skip_first_batches:
                 train_dataloader = accelerate.skip_first_batches(epochs_trained, steps_trained_in_current_epoch)
+                steps_skipped_in_current_epoch = steps_trained_in_current_epoch
                 skip_first_batches = False
 
-            for step, batch in enumerate(train_dataloader):
+            for batch in train_dataloader:
                 with accelerator.accumulate(text_encoder):
                     pixel_values = batch['input_ids'].to(dtype=weight_dtype)
                     input_ids = batch['input_ids']
@@ -785,8 +824,39 @@ def train_fn(
                     noise = torch.randn_like(latents)
                     timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (batch_size,), device=latents.device).long()
                     noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                    # Compute the text embedding
+                    (encoder_hidden_states, *_) = text_encoder(input_ids)
+                    encoder_hidden_states = encoder_hidden_states.to(dtype=weight_dtype)
+                    # Predict the noise
+                    noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+                    # Get the target for loss depending on the prediction type
+                    if noise_scheduler.config.prediction_type == 'epsilon':
+                        target = noise
+                    elif noise_scheduler.config.prediction_type == 'v_prediction':
+                        target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                    else:
+                        raise ValueError(f'Unknown prediction type {noise_scheduler.config.prediction_type}')
 
-                    encoder_hidden_states = text_encoder(input_ids)[0]
+                    loss = F.mse_loss(noise_pred, target, reduction='none').mean([1, 2, 3]).mean()
+                    accelerator.backward(loss)
+
+                    # Zero out the gradients for all token embeddings except the newly added
+                    # embeddings for the concept, as we only want to optimize the concept embeddings
+                    if accelerator.num_processes > 1:
+                        grads = text_encoder.module.get_input_embeddings().weight.grad
+                    else:
+                        grads = text_encoder.get_input_embeddings().weight.grad
+                    # Get the index for tokens that we want to zero the grads for
+                    index_grads_to_zero = torch.arange(len(tokenizer)) != placeholder_token_id
+                    grads.data[index_grads_to_zero, :] = grads.data[index_grads_to_zero, :].fill_(0)
+
+                    optimizer.step()
+                    optimizer.zero_grad()
+                
+                global_step += 1
+                
+                maybe_save(training_args, accelerator)
+
 
 def main() -> None:
     parser = transformers.HfArgumentParser((
