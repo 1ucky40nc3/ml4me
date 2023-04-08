@@ -9,9 +9,9 @@ import os
 import sys
 import glob
 import math
+import time
 import shutil
 import random
-import logging
 import functools
 from dataclasses import (
     dataclass,
@@ -38,6 +38,8 @@ from tqdm import tqdm
 logger = accelerate.logging.get_logger(__name__)
 
 
+TRAINING_ARGS_NAME = 'training_args.bin'
+TRAINER_STATE_NAME = 'trainer_state.json'
 LEARNABLE_CONCEPTS = ['object', 'style']
 
 
@@ -244,6 +246,23 @@ def get_mixed_precision(training_args: transformers.TrainingArguments) -> str:
     return mixed_precision
 
 
+def get_weight_dtype(mixed_precision: Optional[str]) -> torch.dtype:
+    '''Get the `torch.dtype` associated with the precision.
+
+    Args:
+        mixed_precision: A mixed precision string from `get_mixed_precision(...)`.
+    
+    Returns:
+        The `torch.dtype` associated with the precision
+    '''
+    weight_dtype = torch.float32
+    if mixed_precision == 'fp16':
+        weight_dtype = torch.float16
+    elif mixed_precision == 'bf16':
+        weight_dtype = torch.bfloat16
+    return weight_dtype
+
+
 def load_tokenizer(
     model_args: ModelArguments, 
     data_args: DataArguments,
@@ -324,7 +343,7 @@ def freeze_model(model: torch.nn.Module, modules: Optional[Tuple[str]] = None) -
     '''
     if modules is not None:
         for module in modules:
-            modules = deep_getattr(module)
+            module = deep_getattr(model, module)
             for param in module.parameters():
                 param.requires_grad = False
     else:
@@ -393,6 +412,21 @@ def load_models(
     freeze_model(unet)
 
     return text_encoder, vae, unet
+
+
+def load_noise_scheduler(model_args: ModelArguments) -> diffusers.DDPMScheduler:
+    '''Load a noise scheduler for the denoising process.
+
+    Args:
+        model_args: A `ModelArguments` object.
+
+    Returns:
+        A 'diffusers.DDPMScheduler' initialized with the pretrained model config.
+    '''
+    return diffusers.DDPMScheduler.from_config(
+        model_args.model_name_or_path, 
+        subfolder='scheduler'
+    ) 
 
 
 def clean_template(string: str) -> str:
@@ -496,7 +530,8 @@ def load_data(
     model_args: ModelArguments, 
     training_args: transformers.TrainingArguments,
     accelerator: accelerate.Accelerator,
-    tokenizer: transformers.CLIPTokenizer
+    tokenizer: transformers.CLIPTokenizer,
+    batch_size: int
 ) -> Tuple[Optional[torch.utils.data.DataLoader]]:
     '''Return a training data loader.
 
@@ -506,6 +541,7 @@ def load_data(
         training_args: A `transformers.TrainingArguments` object.
         accelerator: A `accelerate.Accelerator` object.
         tokenizer: A `transformers.CLIPTokenizer` object.
+        batch_size: The number of samples on each device per mini-batch.
 
     Returns:
         A data loader for training purposes.
@@ -550,7 +586,7 @@ def load_data(
         def __init__(self):
             super().__init__()
             self.transforms = torch.nn.Sequential(
-                torchvision.transforms.RandomResizedCrop(data_args.size),
+                torchvision.transforms.RandomResizedCrop(data_args.size, antialias=True),
                 torchvision.transforms.RandomHorizontalFlip(data_args.flip_p),
                 torchvision.transforms.ConvertImageDtype(torch.float),
             )
@@ -608,15 +644,149 @@ def load_data(
             train_dataset,
             shuffle=True,
             collate_fn=collate_fn,
-            batch_size=training_args.batch_size
+            batch_size=batch_size
         )
 
     return (
         train_dataloader if training_args.do_train else None,
     )
 
-    
 
+def train_fn(
+    model_args: ModelArguments,
+    data_args: DataArguments,
+    training_args: transformers.TrainingArguments
+) -> None:
+    accelerator = accelerate.Accelerator(
+        mixed_precision=get_mixed_precision(training_args),
+        gradient_accumulation_steps=training_args.gradient_accumulation_steps,
+        log_with=training_args.report_to,
+        logging_dir=training_args.logging_dir
+    )
+
+    @accelerate.find_executable_atch_size(starting_batch_size=training_args.per_device_train_batch_size)
+    def _train_fn(batch_size: int) -> None:
+        nonlocal accelerator
+
+        gradient_accumulation_steps = training_args.per_device_train_batch_size // batch_size
+        accelerator.gradient_accumulation_steps = gradient_accumulation_steps
+
+        accelerator.free_memory()
+        accelerate.utils.set_seed()
+
+        tokenizer, initializer_token_id, placeholder_token_id = load_tokenizer(
+            model_args, data_args
+        )
+        text_encoder, vae, unet = load_models(
+            model_args, tokenizer, initializer_token_id, placeholder_token_id
+        )
+        text_encoder = text_encoder.to(accelerator.device)
+        weight_dtype = get_weight_dtype(accelerator.mixed_precision)
+        vae.to(accelerator.device, dtype=weight_dtype)
+        unet.to(accelerator.device, dtype=weight_dtype)
+
+        optimizer = torch.optim.AdamW(
+            text_encoder.get_input_embeddings().parameters(),
+            lr=training_args.learning_rate
+        )
+
+        (train_dataloader, *_) = load_data(
+            data_args,
+            model_args,
+            training_args,
+            accelerator,
+            tokenizer
+        )
+
+        text_encoder, optimizer, train_dataloader = accelerator.prepare(
+            text_encoder, optimizer, train_dataloader
+        )
+
+        vae.eval()
+        unet.train()
+
+        noise_scheduler = load_noise_scheduler(model_args)
+
+        num_update_steps_per_epoch = max(math.ceil(len(train_dataloader) / gradient_accumulation_steps), 1)
+        if training_args.max_steps > 0:
+            max_steps = training_args.max_steps
+            num_train_epochs = max_steps // num_update_steps_per_epoch + int(max_steps // num_update_steps_per_epoch > 0)
+            num_train_samples = max_steps * training_args.per_device_train_batch_size
+        else:
+            num_train_epochs = training_args.num_train_epochs
+            max_steps = math.ceil(num_train_epochs * num_update_steps_per_epoch)
+            num_train_samples = len(train_dataloader) * training_args.per_device_train_batch_size * num_train_epochs
+
+        total_batch_size = training_args.per_device_train_batch_size * accelerator.num_processes
+        
+        logger.info("***** Running training *****")
+        logger.info(f"  Num examples = {num_train_samples}")
+        logger.info(f"  Num Epochs = {num_train_epochs}")
+        logger.info(f"  Instantaneous batch size per device = {batch_size}")
+        logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+        logger.info(f"  Gradient Accumulation steps = {gradient_accumulation_steps}")
+        logger.info(f"  Total optimization steps = {max_steps}")
+        logger.info(
+            f"  Number of trainable parameters = {sum(p.numel() for p in text_encoder.get_input_embeddings().parameters().parameters() if p.requires_grad)}"
+        )
+
+        state = transformers.TrainerState(
+            is_local_process_zero=accelerator.is_local_main_process,
+            is_world_process_zero=accelerator.is_main_process
+        )
+        state.epoch = 0
+        start_time = time.time()
+        epochs_trained = 0
+        steps_trained_in_current_epoch = 0
+        skip_first_batches = False
+        steps_trained_progress_bar = None
+
+        trainer_state_path = os.path.join(training_args.resume_from_checkpoint, TRAINER_STATE_NAME)
+        if (
+            training_args.resume_from_checkpoint is not None
+            and os.path.isfile(trainer_state_path)
+        ):
+            state = transformers.TrainerState.load_from_json(trainer_state_path)
+            epochs_trained = state.global_step // num_update_steps_per_epoch
+            steps_trained_in_current_epoch = (state.global_step % num_update_steps_per_epoch) * gradient_accumulation_steps
+            skip_first_batches = True
+            logger.info('  Continuing training from checkpoint, will skip to saved global_step')
+            logger.info(f'  Continuing training from epoch {epochs_trained}')
+            logger.info(f'  Continuing training from global step {state.global_step}')
+            logger.info(
+                f'  Will skip the first {epochs_trained} epochs then the first'
+                f' {steps_trained_in_current_epoch} batches in the first epoch.'
+            )
+            if accelerator.is_local_main_process:
+                steps_trained_progress_bar = tqdm(total=steps_trained_in_current_epoch)
+                steps_trained_progress_bar.set_description('Skipping the first batches')
+
+            for epoch in range(epochs_trained):
+                _ = list(train_dataloader.sampler)
+
+        state.max_steps = max_steps
+        state.num_train_epochs = num_train_epochs
+        state.is_local_process_zero = accelerator.is_local_main_process,
+        state.is_world_process_zero=accelerator.is_main_process
+
+        for epoch in range(epochs_trained, num_train_epochs):
+            if skip_first_batches:
+                train_dataloader = accelerate.skip_first_batches(epochs_trained, steps_trained_in_current_epoch)
+                skip_first_batches = False
+
+            for step, batch in enumerate(train_dataloader):
+                with accelerator.accumulate(text_encoder):
+                    pixel_values = batch['input_ids'].to(dtype=weight_dtype)
+                    input_ids = batch['input_ids']
+                    # Convert the images into latent space
+                    latents = vae.encode(pixel_values).latent_dist.sample().detach()
+                    latents = latents * 0.18215
+                    # Sample and add noise to the latents
+                    noise = torch.randn_like(latents)
+                    timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (batch_size,), device=latents.device).long()
+                    noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+
+                    encoder_hidden_states = text_encoder(input_ids)[0]
 
 def main() -> None:
     parser = transformers.HfArgumentParser((
@@ -632,12 +802,10 @@ def main() -> None:
     else:
         model_args, data_args, testing_args, training_args = parser.parse_args_into_dataclasses()
 
-    accelerator = accelerate.Accelerator(
-        mixed_precision=get_mixed_precision(training_args),
-        gradient_accumulation_steps=training_args.gradient_accumulation_steps,
-        log_with=training_args.report_to,
-        logging_dir=training_args.logging_dir
-    )
+    if training_args.do_train:
+        train_fn(model_args, data_args, training_args)
+
+
 
 
 if __name__ == '__main__':
