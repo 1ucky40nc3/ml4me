@@ -120,7 +120,8 @@ class DataArguments:
             )
         }
     )
-    initializer_token: str = field(
+    initializer_token: Optional[str] = field(
+        default=None,
         metadata={
             'help': 'A keyword that summarizes your new concept.'
         }
@@ -138,7 +139,7 @@ class DataArguments:
     learnable_concept: str = field(
         default='object',
         metadata={
-            'help': f'A property to learn from the data. This can be one of {LEARNABLE_PROPERTIES}."'
+            'help': f'A property to learn from the data. This can be one of {LEARNABLE_CONCEPTS}."'
         }
     )
     size: int = field(
@@ -184,6 +185,11 @@ class DataArguments:
         Raise:
             ValueError: The arguments don't meet expectations.
         '''
+        if self.initializer_token is None:
+            raise ValueError(
+                f"The `initializer_token` can't be `None`!"
+                ' You have to set a `--initializert_token` argument.'
+            )
         if self.learnable_concept not in LEARNABLE_CONCEPTS:
             raise ValueError(
                 f'The `learnable_concept` has to be one of {LEARNABLE_CONCEPTS}!'
@@ -207,7 +213,7 @@ class TestingArguments:
     )
 
 
-def get_mixed_precision(training_args: transformers.TrainingArgs) -> str:
+def get_mixed_precision(training_args: transformers.TrainingArguments) -> str:
     '''Return a which precision shall be used.
 
     Args:
@@ -378,6 +384,37 @@ def load_models(
     return text_encoder, vae, unet
 
 
+def clean_template(string: str) -> str:
+    '''Clean a template string.
+
+    Get rid of unwanted chars or sequences like:
+    - "\t"
+    - "\n"
+    - ...
+
+    Args:
+        string: The template string.
+
+    Returns:
+        The cleaned template string.
+    '''
+    string = string.replace('\t', '').replace('\r', '').replace('\n', '')
+    return string
+
+
+def get_extension(path: str) -> str:
+    '''Return a file's extension.
+
+    Args:
+        path: A file path.
+    
+    Returns:
+        The file's extension.
+    '''
+    _, ext = os.path.splitext(path)
+    return ext
+
+
 def create_data(data_args: DataArguments) -> None:
     '''Create a ImageFolder dataset.
 
@@ -387,7 +424,7 @@ def create_data(data_args: DataArguments) -> None:
     Returns:
         The path to the dataset directory. 
     '''
-    if data_args.overwrite_data_output_dir:
+    if data_args.overwrite_data_output_dir and os.path.exists(data_args.data_output_dir):
         shutil.rmtree(data_args.data_output_dir)
     os.makedirs(data_args.data_output_dir, exist_ok=True)
 
@@ -400,12 +437,17 @@ def create_data(data_args: DataArguments) -> None:
             templates.extend(f.readlines())
         
     data = []
-    for i in range(len(image_files) * data_args.num_repeats):
+    num_samples = len(image_files) * data_args.num_repeats
+    for i in range(num_samples):
         template = random.choice(templates)
         template = template.format(data_args.placeholder_token)
-        image_idx = i - (i // len(image_files)) * image_files
+        template = clean_template(template)
+        image_idx = i - (i // len(image_files)) * len(image_files)
         image = image_files[image_idx]
-        data.append([image, template])
+        copy_file = f'%0{len(str(num_samples))}d{get_extension(image)}' % i
+        copy_path = os.path.join(data_args.data_output_dir, copy_file)
+        shutil.copy(image, copy_path)
+        data.append([copy_file, template])
     
     metadata_file = os.path.join(data_args.data_output_dir, 'metadata.tsv')
     df = pd.DataFrame(data)
@@ -413,6 +455,7 @@ def create_data(data_args: DataArguments) -> None:
         metadata_file,
         sep='\t',
         header=[data_args.image_column, data_args.template_column],
+        index=False,
         encoding='utf-8'
     )
 
@@ -545,9 +588,9 @@ def main() -> None:
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, test_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, testing_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, test_args, training_args = parser.parse_args_into_dataclasses()
+        model_args, data_args, testing_args, training_args = parser.parse_args_into_dataclasses()
 
     accelerator = accelerate.Accelerator(
         mixed_precision=get_mixed_precision(training_args),
