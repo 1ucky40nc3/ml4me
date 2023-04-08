@@ -1,5 +1,6 @@
 from typing import (
     Any,
+    Dict,
     Tuple,
     Optional
 )
@@ -97,7 +98,7 @@ class DataArguments:
             'help': 'The name of the dataset column containing the templates.'
         }
     )
-    train_dir: Optional[str] = field(
+    train_file: Optional[str] = field(
         default=None,
         metadata={
             'help': 'A directory containing the training dataset.'
@@ -178,6 +179,18 @@ class DataArguments:
             'help': 'Whether to overwrite the training dataset output directory.'
         }
     )
+    overwrite_cache: bool = field(
+        default=False, 
+        metadata={
+            'help': 'Whether to overwrite cached/preprocessed datasets.'
+        }
+    )
+    preprocessing_num_workers: Optional[int] = field(
+        default=None,
+        metadata={
+            'help': 'The number of workers during preprocessing.'
+        }
+    )
 
     def __post_init__(self) -> None:
         '''Check if the arguments meet expectations.
@@ -234,8 +247,6 @@ def get_mixed_precision(training_args: transformers.TrainingArguments) -> str:
 def load_tokenizer(
     model_args: ModelArguments, 
     data_args: DataArguments,
-    initializer_token: str,
-    placeholder_token: str = '<placeholder>',
 ) -> Tuple[transformers.CLIPTokenizer, int, int]:
     '''Return the prepared pretrained tokenizer and relevant token ids.
     
@@ -261,14 +272,14 @@ def load_tokenizer(
     )
 
     # Add the placeholder token in tokenizer
-    num_added_tokens = tokenizer.add_tokens(placeholder_token)
+    num_added_tokens = tokenizer.add_tokens(data_args.placeholder_token)
     if num_added_tokens == 0:
         raise ValueError(
             'The tokenizer already contains the placeholder token.'
-            f' Provide an alternative! Placeholder token: "{placeholder_token}"'
+            f' Provide an alternative! Placeholder token: "{data_args.placeholder_token}"'
         )
     
-    token_ids = tokenizer.encode(initializer_token, add_special_tokens=False)
+    token_ids = tokenizer.encode(data_args.initializer_token, add_special_tokens=False)
     if len(token_ids) > 1:
         raise ValueError(
             'The tokenizer has the yield one token id for `initializer_token` but did > 1!'
@@ -276,7 +287,7 @@ def load_tokenizer(
         )
     
     initializer_token_id = token_ids[0]
-    placeholder_token_id = tokenizer.convert_tokens_to_ids(placeholder_token)
+    placeholder_token_id = tokenizer.convert_tokens_to_ids(data_args.placeholder_token)
 
     return tokenizer, initializer_token_id, placeholder_token_id
 
@@ -435,7 +446,15 @@ def create_data(data_args: DataArguments) -> None:
     for template_file in template_files:
         with open(template_file, 'r', encoding='utf-8') as f:
             templates.extend(f.readlines())
-        
+
+    image_copies = []
+    num_decimals = len(str(len(image_files)))
+    for i, image_file in enumerate(image_files):
+        copy_file = f'%0{num_decimals}d{get_extension(image_file)}' % i
+        copy_path = os.path.join(data_args.data_output_dir, copy_file)
+        shutil.copy(image_file, copy_path)
+        image_copies.append(copy_path)
+
     data = []
     num_samples = len(image_files) * data_args.num_repeats
     for i in range(num_samples):
@@ -443,20 +462,32 @@ def create_data(data_args: DataArguments) -> None:
         template = template.format(data_args.placeholder_token)
         template = clean_template(template)
         image_idx = i - (i // len(image_files)) * len(image_files)
-        image = image_files[image_idx]
-        copy_file = f'%0{len(str(num_samples))}d{get_extension(image)}' % i
-        copy_path = os.path.join(data_args.data_output_dir, copy_file)
-        shutil.copy(image, copy_path)
-        data.append([copy_file, template])
+        image = image_copies[image_idx]
+        data.append([image, template])
     
-    metadata_file = os.path.join(data_args.data_output_dir, 'metadata.tsv')
+    metadata_file = os.path.join(data_args.data_output_dir, 'metadata.csv')
     df = pd.DataFrame(data)
     df.to_csv(
         metadata_file,
-        sep='\t',
         header=[data_args.image_column, data_args.template_column],
         index=False,
         encoding='utf-8'
+    )
+
+
+def read_image(path: str) -> torch.Tensor:
+    '''Read a image file.
+
+    Args:
+        path: The image file path.
+    
+    Returns:
+        A `torch.Tensor` with the RGB image pixel data.
+        The pixel values are from 0 to 255 in the `torch.uint8` format.
+    '''
+    return torchvision.io.read_image(
+        path, 
+        mode=torchvision.io.ImageReadMode.RGB
     )
 
 
@@ -489,10 +520,10 @@ def load_data(
             cache_dir=model_args.cache_dir,
             use_auth_token=True if model_args.use_auth_token else None
         )
-    elif data_args.train_dir is not None:
-        data_files = {'train': os.path.join(data_args.train_dir, '**')}
+    elif data_args.train_file is not None:
+        data_files = {'train': data_args.train_file}
         dataset = datasets.load_dataset(
-            'imagefolder',
+            get_extension(data_args.train_file)[1:],
             data_files=data_files,
             cache_dir=model_args.cache_dir
         )
@@ -501,9 +532,9 @@ def load_data(
         and data_args.templates_dir is not None
     ):
         create_data(data_args)
-        data_files = {'train': os.path.join(data_args.data_output_dir, '**')}
+        data_files = {'train': os.path.join(data_args.data_output_dir, 'metadata.csv')}
         dataset = datasets.load_dataset(
-            'imagefolder',
+            get_extension(data_files['train'])[1:],
             data_files=data_files,
             cache_dir=model_args.cache_dir
         )
@@ -514,23 +545,32 @@ def load_data(
         )
     
     column_names = dataset['train'].column_names
-    
-    train_transforms = torchvision.transforms.Compose([
-        torchvision.transforms.RandomResizedCrop(data_args.size),
-        torchvision.transforms.RandomHorizontalFlip(data_args.flip_p),
-        torchvision.transforms.ToTensor(),
-        torchvision.transforms.Lambda(lambda img: img * 2 - 1)
-    ])
 
-    def transform_fn(examples, transforms):
+    class TrainTransform(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.transforms = torch.nn.Sequential(
+                torchvision.transforms.RandomResizedCrop(data_args.size),
+                torchvision.transforms.RandomHorizontalFlip(data_args.flip_p),
+                torchvision.transforms.ConvertImageDtype(torch.float),
+            )
+
+        def forward(self, x) -> torch.Tensor:
+            with torch.no_grad():
+                x = self.transforms(x)
+                x = x / 127.5 - 1.0
+            return x
+
+    def transform_fn(examples, transform):
         '''Apply transforms on images of a batch.'''
-        examples["pixel_values"] = [
-            transforms(pil_img.convert("RGB"))
-            for pil_img in examples['image']
+        examples['pixel_values'] = [
+            transform(read_image(image_path))
+            for image_path in examples[data_args.image_column]
         ]
         return examples
     
-    train_transform_fn = functools.partial(transform_fn, transforms=train_transforms)
+    train_transform = torch.jit.script(TrainTransform())
+    train_transform_fn = functools.partial(transform_fn, transform=train_transform)
     
     def tokenize_fn(examples):
         '''Tokenize the templates of a batch'''
@@ -538,29 +578,29 @@ def load_data(
         inputs = tokenizer(
             templates, 
             padding='max_length', 
-            truncation=True,
             max_length=tokenizer.model_max_length,
-            return_tensors='pt'
+            truncation=True
         )
         examples['input_ids'] = inputs.input_ids
         return examples
 
     if training_args.do_train:
-        with accelerator.main_process_fist():
-            dataset['train'] = dataset['train'].shuffle(seed=training_args.seed)
+        with accelerator.main_process_first():
+            train_dataset = dataset['train'].shuffle(seed=training_args.seed)
             train_dataset = train_dataset.map(
                 function=tokenize_fn,
                 batched=True,
-                remove_columns=[col for col in column_names if col != 'image'],
+                remove_columns=[col for col in column_names if col != data_args.image_column],
                 num_proc=data_args.preprocessing_num_workers,
                 load_from_cache_file=not data_args.overwrite_cache,
                 desc='Running tokenizer on train dataset',
             )
+            # Transform images on the fly
             train_dataset.set_transform(train_transform_fn)
 
-    def collate_fn(examples):
+    def collate_fn(examples: Dict[str, Any]) -> Dict[str, Any]:
         pixel_values = torch.stack([example['pixel_values'] for example in examples])
-        input_ids = torch.tensor([example['input_ids'] for example in examples])
+        input_ids = torch.tensor([example['input_ids'] for example in examples], dtype=torch.long)
         return {'pixel_values': pixel_values, 'input_ids': input_ids}
 
     if training_args.do_train:
