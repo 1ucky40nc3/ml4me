@@ -3,6 +3,7 @@ from typing import (
     List,
     Dict,
     Tuple,
+    Union,
     Optional
 )
 
@@ -669,9 +670,19 @@ def get_global_step(path: str) -> int:
     return global_step
 
 
-def get_trainable_parameters(models: List[torch.nn.Module] = []) -> int:
-    # TODO: implement
-    pass
+def get_num_trainable_parameters(models: List[torch.nn.Module] = []) -> int:
+    '''Return the number of trainable parameters.
+
+    Args:
+        models: A list of models of trainable `toch.nn.Modules`.
+
+    Returns:
+        The total number of trainable parameters updated during training.
+    '''
+    num_trainable_parameters = 0
+    for model in models:
+        num_trainable_parameters += sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return num_trainable_parameters
 
 
 def get_save_steps(
@@ -705,7 +716,8 @@ def maybe_save(
     training_args: transformers.TrainingArguments, 
     accelerator: accelerate.Accelerator,
     global_step: int,
-    num_update_steps_per_epoch: Optional[int] = None
+    num_update_steps_per_epoch: Optional[int] = None,
+    force_save: bool = False
 ) -> None:
     '''Maybe save if conditions are met.
 
@@ -723,7 +735,7 @@ def maybe_save(
         ValueError: The `num_update_steps_per_epoch` is required when `training_args.save_stragety == "epoch"`.
     '''
     save_steps = get_save_steps(training_args, num_update_steps_per_epoch)
-    if global_step % save_steps == 0 and global_step != 0:
+    if (global_step % save_steps == 0 and global_step != 0) or force_save:
         if training_args.save_total_limit is not None:
             # Only keep the latest `training_args.save_total_limit` number of checkpoints
             all_saves = glob.glob(os.path.join(training_args.output_dir, r'steps_\d'))
@@ -735,6 +747,59 @@ def maybe_save(
 
         save_dir = os.path.join(training_args.output_dir, f'steps_{global_step}')
         accelerator.save_state(accelerator)
+
+
+def save_pipeline(
+    training_args: transformers.TrainingArguments,
+    accelerator: accelerate.Accelerator,
+    text_encoder: transformers.CLIPTextModel, 
+    vae: diffusers.AutoencoderKL, 
+    unet: diffusers.UNet2DConditionModel,
+    tokenizer: transformers.CLIPTokenizer
+) -> None:
+    '''Create and save a `diffusers.StableDiffusionPipeline`.
+
+    Args:
+        training_args: A `transformers.TrainingArguments` object.
+        accelerator: Our current accelerator object.
+        text_encoder: A pretrained `transformers.CLIPTextModel`.
+        vae: A pretrained `diffusers.AutoencoderKL`.
+        unet: A pretrained `diffusers.UNet2DConditionModel`.
+        tokenizer: A `transformers.CLIPTokenizer` object.
+    '''
+    pipeline = diffusers.StableDiffusionPipeline.from_pretrained(
+        training_args.model_name_or_path,
+        text_encoder=accelerator.unwrap_model(text_encoder),
+        tokenizer=tokenizer,
+        vae=vae,
+        unet=unet,
+    )
+    pipeline.save(training_args.output_dir)
+
+
+def load_pipeline(
+    training_args: transformers.TrainingArguments,
+    accelerator: accelerate.Accelerator,
+) -> diffusers.StableDiffusionPipeline:
+    '''Create and save a `diffusers.StableDiffusionPipeline`.
+
+    Args:
+        training_args: A `transformers.TrainingArguments` object.
+        accelerator: Our current accelerator object.
+
+    Returns:
+        A pretrained `diffusers.StableDiffusionPipeline`.
+    '''
+    noise_scheduler = diffusers.DPMSolverMultistepScheduler.from_pretrained(
+        training_args.output_dir, 
+        subfolder="scheduler"
+    )
+    weight_dtype = get_weight_dtype(accelerator.mixed_precision)
+    return diffusers.StableDiffusionPipeline.from_pretrained(
+        training_args.output_dir,
+        scheduler=noise_scheduler,
+        torch_dtype=weight_dtype,
+    ).to(accelerator.device)
 
 
 def get_logging_steps(
@@ -763,13 +828,29 @@ def get_logging_steps(
         return training_args.logging_steps * num_update_steps_per_epoch
 
 
+def convert_to_primitives(**kwargs) -> Dict[str, Any]:
+    '''Convert `kwargs` into a primitives friendly format.
+
+    This function is used to convert metrics with `torch.Tensor`
+    values into a logging friendly format based on primitives.
+
+    Returns:
+        A dictionary of the formatted `kwargs`.
+    '''
+    for key, value in kwargs.items():
+        if isinstance(value, torch.Tensor):
+            kwargs[key] = value.detach().cpu().item()
+    return kwargs
+
+
 def maybe_log(
     training_args: transformers.TrainingArguments,
     accelerator: accelerate.Accelerator,
     global_step: int,
     metrics: Dict[str, Any] = {},
     progress_bar: Optional[tqdm] = None,
-    num_update_steps_per_epoch: Optional[int] = None
+    num_update_steps_per_epoch: Optional[int] = None,
+    force_log: bool = False
 ) -> None:
     '''Maybe log if conditions are met.
 
@@ -787,7 +868,8 @@ def maybe_log(
         ValueError: The `num_update_steps_per_epoch` is required when `training_args.logging_strategy == "epoch"`.
     '''
     logging_steps = get_logging_steps(training_args, num_update_steps_per_epoch)
-    if global_step % logging_steps == 0:
+    if global_step % logging_steps == 0 or force_log:
+        metrics = convert_to_primitives(**metrics)
         if training_args.report_to is not None:
             accelerator.log(
                 {
@@ -798,11 +880,6 @@ def maybe_log(
             )
         if progress_bar is not None:
             progress_bar.set_postfix(**metrics)
-
-
-def train_step() -> None:
-    # TODO: implement
-    pass
 
 
 def train_fn(
@@ -830,6 +907,7 @@ def train_fn(
         tokenizer, initializer_token_id, placeholder_token_id = load_tokenizer(
             model_args, data_args
         )
+        num_tokens = len(tokenizer)
         text_encoder, vae, unet = load_models(
             model_args, tokenizer, initializer_token_id, placeholder_token_id
         )
@@ -881,7 +959,7 @@ def train_fn(
         logger.info(f'  Gradient Accumulation steps = {gradient_accumulation_steps}')
         logger.info(f'  Total optimization steps = {max_steps}')
         logger.info(
-            f'  Number of trainable parameters = {sum(p.numel() for p in text_encoder.get_input_embeddings().parameters().parameters() if p.requires_grad)}'
+            f'  Number of trainable parameters = {get_num_trainable_parameters(text_encoder.get_input_embeddings())}'
         )
 
         start_time = time.time()
@@ -908,6 +986,7 @@ def train_fn(
                 train_dataloader = accelerate.skip_first_batches(epochs_trained, steps_trained_in_current_epoch)
                 skip_first_batches = False
 
+            text_encoder.train()
             for batch in train_dataloader:
                 with accelerator.accumulate(text_encoder):
                     pixel_values = batch['input_ids'].to(dtype=weight_dtype)
@@ -942,17 +1021,62 @@ def train_fn(
                     else:
                         grads = text_encoder.get_input_embeddings().weight.grad
                     # Get the index for tokens that we want to zero the grads for
-                    index_grads_to_zero = torch.arange(len(tokenizer)) != placeholder_token_id
+                    index_grads_to_zero = torch.arange(num_tokens) != placeholder_token_id
                     grads.data[index_grads_to_zero, :] = grads.data[index_grads_to_zero, :].fill_(0)
 
                     optimizer.step()
                     optimizer.zero_grad()
                 
+                metrics = {'loss': loss}
+
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
                     global_step += 1
                 
-                maybe_save(training_args, accelerator)
+                    maybe_save(
+                        training_args, 
+                        accelerator, 
+                        global_step, 
+                        num_update_steps_per_epoch
+                    )
+                    maybe_log(
+                        training_args, 
+                        accelerator, 
+                        global_step, 
+                        metrics, 
+                        progress_bar, 
+                        num_update_steps_per_epoch
+                    )
+
+            accelerator.wait_for_everyone()
+
+        # Save a final checkpoint
+        maybe_save(
+            training_args, 
+            accelerator, 
+            global_step, 
+            num_update_steps_per_epoch,
+            force_save=True
+        )
+        # Log a final time
+        maybe_log(
+            training_args, 
+            accelerator, 
+            global_step, 
+            metrics, 
+            progress_bar, 
+            num_update_steps_per_epoch,
+            force_log=True
+        )
+        # Save a fine-tuned stable-diffusion pipeline
+        save_pipeline(
+            training_args,
+            accelerator,
+            text_encoder,
+            vae,
+            unet,
+            tokenizer
+        )
 
 
 def main() -> None:
