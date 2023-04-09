@@ -1,5 +1,6 @@
 from typing import (
     Any,
+    List,
     Dict,
     Tuple,
     Optional
@@ -32,7 +33,7 @@ import datasets
 import diffusers
 import accelerate
 
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 
 logger = accelerate.logging.get_logger(__name__)
@@ -668,6 +669,35 @@ def get_global_step(path: str) -> int:
     return global_step
 
 
+def get_trainable_parameters(models: List[torch.nn.Module] = []) -> int:
+    # TODO: implement
+    pass
+
+
+def get_save_steps(
+    training_args: transformers.TrainingArguments,
+    num_update_steps_per_epoch: Optional[int] = None
+) -> int:
+    '''Number of update steps per save interval.
+
+    Args:
+        training_args: A `transformers.TrainingArguments` object.
+        num_update_steps_per_epoch: The number of update steps per epoch.
+                                    This kwarg is required if 
+                                    `training_args.save_stragety == "epoch"`.
+    
+    Returns:
+        The number of update steps per save interval.
+
+    Raises:
+        ValueError: The `num_update_steps_per_epoch` is required when `training_args.save_stragety == "epoch"`.
+    '''
+    if training_args.save_strategy == 'steps':
+        return training_args.save_steps
+    else:
+        if num_update_steps_per_epoch is None:
+            raise ValueError('The `num_update_steps_per_epoch` is required when `training_args.save_stragety == "epoch"`!')
+        return training_args.save_steps * num_update_steps_per_epoch
 
 
 
@@ -675,6 +705,7 @@ def maybe_save(
     training_args: transformers.TrainingArguments, 
     accelerator: accelerate.Accelerator,
     global_step: int,
+    num_update_steps_per_epoch: Optional[int] = None
 ) -> None:
     '''Maybe save if conditions are met.
 
@@ -685,12 +716,14 @@ def maybe_save(
         training_args: A `transformers.TrainingArguments` object.
         accelerator: Our current accelerator object.
         global_step: The current global training step.
-        num_update_steps_per_epoch: The number of update steps of each training epoch.
+        num_update_steps_per_epoch: The number of update steps per epoch.
+                                    This kwarg is required if 
+                                    `training_args.save_stragety == "epoch"`.    
+    Raises:
+        ValueError: The `num_update_steps_per_epoch` is required when `training_args.save_stragety == "epoch"`.
     '''
-    if (
-        training_args.save_strategy == 'steps'
-        and training_args.save_steps % global_step == 0
-    ):
+    save_steps = get_save_steps(training_args, num_update_steps_per_epoch)
+    if global_step % save_steps == 0 and global_step != 0:
         if training_args.save_total_limit is not None:
             # Only keep the latest `training_args.save_total_limit` number of checkpoints
             all_saves = glob.glob(os.path.join(training_args.output_dir, r'steps_\d'))
@@ -702,6 +735,74 @@ def maybe_save(
 
         save_dir = os.path.join(training_args.output_dir, f'steps_{global_step}')
         accelerator.save_state(accelerator)
+
+
+def get_logging_steps(
+    training_args: transformers.TrainingArguments,
+    num_update_steps_per_epoch: Optional[int] = None
+) -> int:
+    '''Number of update steps per save interval.
+
+    Args:
+        training_args: A `transformers.TrainingArguments` object.
+        num_update_steps_per_epoch: The number of update steps per epoch.
+                                    This kwarg is required if 
+                                    `training_args.logging_strategy == "epoch"`.
+    
+    Returns:
+        The number of update steps per save interval.
+
+    Raises:
+        ValueError: The `num_update_steps_per_epoch` is required when `training_args.logging_strategy == "epoch"`.
+    '''
+    if training_args.logging_strategy == 'steps':
+        return training_args.logging_steps
+    else:
+        if num_update_steps_per_epoch is None:
+            raise ValueError('The `num_update_steps_per_epoch` is required when `training_args.logging_strategy == "epoch"`!')
+        return training_args.logging_steps * num_update_steps_per_epoch
+
+
+def maybe_log(
+    training_args: transformers.TrainingArguments,
+    accelerator: accelerate.Accelerator,
+    global_step: int,
+    metrics: Dict[str, Any] = {},
+    progress_bar: Optional[tqdm] = None,
+    num_update_steps_per_epoch: Optional[int] = None
+) -> None:
+    '''Maybe log if conditions are met.
+
+    Check if the `training_args.logging_strategy` and `training_args.logging_steps`
+    specify conditions that are met at the current `global_step`.
+
+    Args:
+        training_args: A `transformers.TrainingArguments` object.
+        accelerator: Our current accelerator object.
+        global_step: The current global training step.
+        num_update_steps_per_epoch: The number of update steps per epoch.
+                                    This kwarg is required if 
+                                    `training_args.logging_strategy == "epoch"`.    
+    Raises:
+        ValueError: The `num_update_steps_per_epoch` is required when `training_args.logging_strategy == "epoch"`.
+    '''
+    logging_steps = get_logging_steps(training_args, num_update_steps_per_epoch)
+    if global_step % logging_steps == 0:
+        if training_args.report_to is not None:
+            accelerator.log(
+                {
+                    **metrics,
+                    'global_step': global_step
+                },
+                step=global_step
+            )
+        if progress_bar is not None:
+            progress_bar.set_postfix(**metrics)
+
+
+def train_step() -> None:
+    # TODO: implement
+    pass
 
 
 def train_fn(
@@ -771,22 +872,21 @@ def train_fn(
             num_train_samples = len(train_dataloader) * training_args.per_device_train_batch_size * num_train_epochs
 
         total_batch_size = training_args.per_device_train_batch_size * accelerator.num_processes
-        
-        logger.info("***** Running training *****")
-        logger.info(f"  Num examples = {num_train_samples}")
-        logger.info(f"  Num Epochs = {num_train_epochs}")
-        logger.info(f"  Instantaneous batch size per device = {batch_size}")
-        logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-        logger.info(f"  Gradient Accumulation steps = {gradient_accumulation_steps}")
-        logger.info(f"  Total optimization steps = {max_steps}")
+
+        logger.info('***** Running training *****')
+        logger.info(f'  Num examples = {num_train_samples}')
+        logger.info(f'  Num Epochs = {num_train_epochs}')
+        logger.info(f'  Instantaneous batch size per device = {batch_size}')
+        logger.info(f'  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}')
+        logger.info(f'  Gradient Accumulation steps = {gradient_accumulation_steps}')
+        logger.info(f'  Total optimization steps = {max_steps}')
         logger.info(
-            f"  Number of trainable parameters = {sum(p.numel() for p in text_encoder.get_input_embeddings().parameters().parameters() if p.requires_grad)}"
+            f'  Number of trainable parameters = {sum(p.numel() for p in text_encoder.get_input_embeddings().parameters().parameters() if p.requires_grad)}'
         )
 
         start_time = time.time()
         global_step = 0
         skip_first_batches = False
-        steps_trained_progress_bar = None
 
         if training_args.resume_from_checkpoint is not None:
             accelerator.load_state(training_args.resume_from_checkpoint)
@@ -800,17 +900,12 @@ def train_fn(
                 f'  Will skip the first {epochs_trained} epochs then the first'
                 f' {steps_trained_in_current_epoch} batches in the first epoch.'
             )
-            if accelerator.is_local_main_process:
-                steps_trained_progress_bar = tqdm(total=steps_trained_in_current_epoch)
-                steps_trained_progress_bar.set_description('Skipping the first batches')
 
-            for epoch in range(epochs_trained):
-                _ = list(train_dataloader.sampler)
+        progress_bar = tqdm(range(global_step, max_steps), desc='Steps', disable=not accelerator.is_local_main_process)
 
         for _ in range(epochs_trained, num_train_epochs):
             if skip_first_batches:
                 train_dataloader = accelerate.skip_first_batches(epochs_trained, steps_trained_in_current_epoch)
-                steps_skipped_in_current_epoch = steps_trained_in_current_epoch
                 skip_first_batches = False
 
             for batch in train_dataloader:
@@ -853,7 +948,9 @@ def train_fn(
                     optimizer.step()
                     optimizer.zero_grad()
                 
-                global_step += 1
+                if accelerator.sync_gradients:
+                    progress_bar.update(1)
+                    global_step += 1
                 
                 maybe_save(training_args, accelerator)
 
