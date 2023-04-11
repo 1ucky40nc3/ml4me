@@ -12,6 +12,7 @@ import sys
 import glob
 import math
 import json
+import uuid
 import shutil
 import random
 import logging
@@ -38,6 +39,7 @@ import accelerate
 
 from tqdm.auto import tqdm
 
+import PIL
 
 logger = accelerate.logging.get_logger(__name__)
 
@@ -223,11 +225,53 @@ class DataArguments:
             
 
 @dataclass
-class TestingArguments:
+class InferenceArguments:
+    do_inference: bool = field(
+        default=False,
+        metadata={
+            'help': 'Whether to do inference.'
+        }
+    )
     prompt_or_path_to_prompts: Optional[str] = field(
         default=None,
         metadata={
             'help': 'A text prompt or a text file where each line is a new prompt.'
+        }
+    )
+    height: Optional[int] = field(
+        default=None,
+        metadata={
+            'help': (
+                'The height of generated images.'
+                ' This defaults to `self.unet.config.sample_size * self.vae_scale_factor`.'
+            )
+        }
+    )
+    width: Optional[int] = field(
+        default=None,
+        metadata={
+            'help': (
+                'The width of generated images.'
+                ' This defaults to `self.unet.config.sample_size * self.vae_scale_factor`.'
+            )
+        }
+    )
+    num_inference_steps: int = field(
+        default=30,
+        metadata={
+            'help': 'The number inference (denoising) steps during image generation.'
+        }
+    )
+    guidance_scale: float = field(
+        default=7.5,
+        metadata={
+            'help': 'The guidance scale for classifier-free diffusion guidance.'
+        }
+    )
+    num_images_per_prompt: int = field(
+        default=1,
+        metadata={
+            'help': 'The number of samples to generate.'
         }
     )
 
@@ -968,8 +1012,7 @@ def train_fn(
         }
         config = convert_to_primitives(**config)
         accelerator.init_trackers(training_args.run_name, config)
-
-
+    
     @accelerate.utils.find_executable_batch_size(starting_batch_size=training_args.per_device_train_batch_size)
     def _train_fn(batch_size: int) -> None:
         nonlocal accelerator
@@ -1147,22 +1190,128 @@ def train_fn(
     _train_fn()
 
 
+def load_prompts(inferece_args: InferenceArguments) -> List[str]:
+    '''Load text prompts.
+
+    Return the prompt or read prompts from a text file at the path
+    provided by `inferece_args.prompt_or_path_to_prompts` or the
+    `--prompt_or_path_to_prompts` command-line argument.
+
+    Args:
+        inference_args: A `InferenceArguments` object.
+
+    Returns:
+        A list of text prompts.
+    '''
+    if os.path.isfile(inferece_args.prompt_or_path_to_prompts):
+        with open(inferece_args.prompt_or_path_to_prompts, 'r', encoding='utf-8') as f:
+            prompts = f.readlines()
+    return [prompts]
+
+
+def save_outputs(
+    training_args: transformers.TrainingArguments,
+    output: diffusers.pipelines.stable_diffusion.StableDiffusionPipelineOutput
+) -> None:
+    '''Save the stable-diffusion pipeline outputs.
+    
+    Args:
+        training_args: A `transformers.TrainingArguments` object.
+        output: A stable-diffusion pipeline output.
+
+    Raises:
+        ValueError: The `output.images` format is unknown.
+    '''
+    for image in output.images:
+        filename = f'{str(uuid.uuid4())}.png'
+        path = os.path.join(training_args, filename)
+        if isinstance(image, PIL.Image):
+            image.save(path)
+        elif isinstance(image, np.ndarray):
+            image = PIL.Image.fromarray(image, mode='RGB')
+            image.save(path)
+        else:
+            raise ValueError(f'Saving images from a object of type `{type(image)} is not implemented!`')
+
+
+def inference_fn(
+    model_args: ModelArguments,
+    data_args: DataArguments,
+    inference_args: InferenceArguments,
+    training_args: transformers.TrainingArguments
+) -> None:
+    accelerator = accelerate.Accelerator(
+        mixed_precision=get_mixed_precision(training_args),
+        gradient_accumulation_steps=training_args.gradient_accumulation_steps,
+        log_with=training_args.report_to,
+        logging_dir=training_args.logging_dir
+    )
+
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+    logger.info(accelerator.state, main_process_only=False)
+    if accelerator.is_local_main_process:
+        datasets.utils.logging.set_verbosity_warning()
+        transformers.utils.logging.set_verbosity_info()
+    else:
+        datasets.utils.logging.set_verbosity_error()
+        transformers.utils.logging.set_verbosity_error()
+
+    if training_args.report_to is not None:
+        config = {
+            **asdict(model_args),
+            **asdict(data_args),
+            **asdict(training_args)
+        }
+        config = convert_to_primitives(**config)
+        accelerator.init_trackers(training_args.run_name, config)
+    
+    # Load the prompts from a text if necessary
+    prompts = load_prompts(inference_args)
+
+    pipeline = load_pipeline(training_args, accelerator)
+    outputs = pipeline(
+        prompts,
+        inference_args.height,
+        inference_args.width,
+        inference_args.num_inference_steps,
+        inference_args.guidance_scale
+    )
+
+    save_outputs(outputs)
+
+
 def main() -> None:
     parser = transformers.HfArgumentParser((
         ModelArguments, 
         DataArguments, 
-        TestingArguments,
+        InferenceArguments,
         transformers.TrainingArguments
     ))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, testing_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, inference_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, testing_args, training_args = parser.parse_args_into_dataclasses()
+        model_args, data_args, inference_args, training_args = parser.parse_args_into_dataclasses()
 
     if training_args.do_train:
-        train_fn(model_args, data_args, training_args)
+        train_fn(
+            model_args, 
+            data_args, 
+            training_args
+        )
+
+    if inference_args.do_inference:
+        inference_fn(
+            model_args, 
+            data_args, 
+            inference_args, 
+            training_args
+        )
 
 
 
