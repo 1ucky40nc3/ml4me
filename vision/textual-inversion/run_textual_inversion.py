@@ -39,7 +39,7 @@ import accelerate
 
 from tqdm.auto import tqdm
 
-from PIL import Image
+import PIL
 
 
 logger = accelerate.logging.get_logger(__name__)
@@ -1234,10 +1234,10 @@ def save_outputs(
     for image in output.images:
         filename = f'{str(uuid.uuid4())}.png'
         path = os.path.join(training_args.output_dir, filename)
-        if isinstance(image, Image):
+        if isinstance(image, PIL.Image.Image):
             image.save(path)
         elif isinstance(image, np.ndarray):
-            image = Image.fromarray(image, mode='RGB')
+            image = PIL.Image.fromarray(image, mode='RGB')
             image.save(path)
         else:
             raise ValueError(f'Saving images from a object of type `{type(image)} is not implemented!`')
