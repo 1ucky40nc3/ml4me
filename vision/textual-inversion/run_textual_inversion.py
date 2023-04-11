@@ -753,10 +753,11 @@ def maybe_save(
                     shutil.rmtree(save_dir)
 
         save_dir = os.path.join(training_args.output_dir, f'steps_{global_step}')
-        accelerator.save_state(accelerator)
+        accelerator.save_state(save_dir)
 
 
 def save_pipeline(
+    model_args: ModelArguments,
     training_args: transformers.TrainingArguments,
     accelerator: accelerate.Accelerator,
     text_encoder: transformers.CLIPTextModel, 
@@ -775,7 +776,7 @@ def save_pipeline(
         tokenizer: A `transformers.CLIPTokenizer` object.
     '''
     pipeline = diffusers.StableDiffusionPipeline.from_pretrained(
-        training_args.model_name_or_path,
+        model_args.model_name_or_path,
         text_encoder=accelerator.unwrap_model(text_encoder),
         tokenizer=tokenizer,
         vae=vae,
@@ -799,7 +800,7 @@ def load_pipeline(
     '''
     noise_scheduler = diffusers.DPMSolverMultistepScheduler.from_pretrained(
         training_args.output_dir, 
-        subfolder="scheduler"
+        subfolder='scheduler'
     )
     weight_dtype = get_weight_dtype(accelerator.mixed_precision)
     return diffusers.StableDiffusionPipeline.from_pretrained(
@@ -1134,6 +1135,7 @@ def train_fn(
         )
         # Save a fine-tuned stable-diffusion pipeline
         save_pipeline(
+            model_args,
             training_args,
             accelerator,
             text_encoder,
