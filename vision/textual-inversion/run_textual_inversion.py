@@ -1290,7 +1290,7 @@ def inference_fn(
         inference_args.guidance_scale
     )
 
-    save_outputs(outputs)
+    save_outputs(training_args, outputs)
 
 
 def main() -> None:
