@@ -1206,8 +1206,8 @@ def load_prompts(inferece_args: InferenceArguments) -> List[str]:
     '''
     if os.path.isfile(inferece_args.prompt_or_path_to_prompts):
         with open(inferece_args.prompt_or_path_to_prompts, 'r', encoding='utf-8') as f:
-            prompts = f.readlines()
-    return [prompts]
+            return f.readlines()
+    return [inferece_args.prompt_or_path_to_prompts]
 
 
 def save_outputs(
