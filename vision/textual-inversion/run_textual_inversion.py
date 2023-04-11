@@ -1277,7 +1277,9 @@ def inference_fn(
         }
         config = convert_to_primitives(**config)
         accelerator.init_trackers(training_args.run_name, config)
-    
+
+    accelerate.utils.set_seed(training_args.seed)
+
     # Load the prompts from a text if necessary
     prompts = load_prompts(inference_args)
 
