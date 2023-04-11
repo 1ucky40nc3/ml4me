@@ -41,6 +41,7 @@ from tqdm.auto import tqdm
 
 import PIL
 
+
 logger = accelerate.logging.get_logger(__name__)
 
 
@@ -826,7 +827,7 @@ def save_pipeline(
         vae=vae,
         unet=unet,
     )
-    pipeline.save(training_args.output_dir)
+    pipeline.save_pretrained(training_args.output_dir)
 
 
 def load_pipeline(
