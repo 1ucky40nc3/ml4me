@@ -286,7 +286,7 @@ def load_tokenizer(
     '''
     tokenizer = transformers.CLIPTokenizer.from_pretrained(
         model_args.model_name_or_path,
-        subfolder="tokenizer",
+        subfolder='tokenizer',
         cache_dir=model_args.cache_dir,
         use_auth_token=True if model_args.use_auth_token else None,
         revision=model_args.model_revision
@@ -670,15 +670,18 @@ def get_global_step(path: str) -> int:
     return global_step
 
 
-def get_num_trainable_parameters(models: List[torch.nn.Module] = []) -> int:
+def get_num_trainable_parameters(models: Union[torch.nn.Module, List[torch.nn.Module]] = []) -> int:
     '''Return the number of trainable parameters.
 
     Args:
-        models: A list of models of trainable `toch.nn.Modules`.
+        models: A model or list of models of type `toch.nn.Module`.
 
     Returns:
-        The total number of trainable parameters updated during training.
+        The total number of trainable parameters.
     '''
+    if not isinstance(models, (list, tuple)):
+        models = list(models)
+
     num_trainable_parameters = 0
     for model in models:
         num_trainable_parameters += sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -730,7 +733,9 @@ def maybe_save(
         global_step: The current global training step.
         num_update_steps_per_epoch: The number of update steps per epoch.
                                     This kwarg is required if 
-                                    `training_args.save_stragety == "epoch"`.    
+                                    `training_args.save_stragety == "epoch"`.
+        force_save: Whether to saving a checkpoint once.
+   
     Raises:
         ValueError: The `num_update_steps_per_epoch` is required when `training_args.save_stragety == "epoch"`.
     '''
@@ -863,7 +868,9 @@ def maybe_log(
         global_step: The current global training step.
         num_update_steps_per_epoch: The number of update steps per epoch.
                                     This kwarg is required if 
-                                    `training_args.logging_strategy == "epoch"`.    
+                                    `training_args.logging_strategy == "epoch"`.
+        force_log: Whether to force logging once.
+
     Raises:
         ValueError: The `num_update_steps_per_epoch` is required when `training_args.logging_strategy == "epoch"`.
     '''
@@ -882,6 +889,47 @@ def maybe_log(
             progress_bar.set_postfix(**metrics)
 
 
+def maybe_log_or_save(
+    training_args: transformers.TrainingArguments,
+    accelerator: accelerate.Accelerator,
+    global_step: int,
+    metrics: Dict[str, Any] = {},
+    progress_bar: Optional[tqdm] = None,
+    num_update_steps_per_epoch: Optional[int] = None,
+    force_log: bool = False,
+    force_save: bool = False
+) -> None:
+    '''Maybe log or save if conditions are met.
+
+    Args:
+        training_args: A `transformers.TrainingArguments` object.
+        accelerator: Our current accelerator object.
+        global_step: The current global training step.
+        num_update_steps_per_epoch: The number of update steps per epoch.
+                                    This kwarg is required if 
+                                    `training_args.save_stragety == "epoch"`.
+                                    or `training_args.logging_strategy == "epoch"`.
+        force_log: Whether to force logging once.
+        force_save: Whether to saving a checkpoint once.
+    '''
+    maybe_log(
+        training_args, 
+        accelerator, 
+        global_step, 
+        metrics, 
+        progress_bar, 
+        num_update_steps_per_epoch,
+        force_log=force_log
+    )
+    maybe_save(
+        training_args, 
+        accelerator, 
+        global_step, 
+        num_update_steps_per_epoch,
+        force_save=force_save
+    )
+
+
 def train_fn(
     model_args: ModelArguments,
     data_args: DataArguments,
@@ -894,7 +942,7 @@ def train_fn(
         logging_dir=training_args.logging_dir
     )
 
-    @accelerate.find_executable_atch_size(starting_batch_size=training_args.per_device_train_batch_size)
+    @accelerate.utils.find_executable_batch_size(starting_batch_size=training_args.per_device_train_batch_size)
     def _train_fn(batch_size: int) -> None:
         nonlocal accelerator
 
@@ -902,7 +950,7 @@ def train_fn(
         accelerator.gradient_accumulation_steps = gradient_accumulation_steps
 
         accelerator.free_memory()
-        accelerate.utils.set_seed()
+        accelerate.utils.set_seed(training_args.seed)
 
         tokenizer, initializer_token_id, placeholder_token_id = load_tokenizer(
             model_args, data_args
@@ -926,7 +974,8 @@ def train_fn(
             model_args,
             training_args,
             accelerator,
-            tokenizer
+            tokenizer,
+            batch_size
         )
 
         text_encoder, optimizer, train_dataloader = accelerator.prepare(
@@ -945,7 +994,7 @@ def train_fn(
             num_train_epochs = max_steps // num_update_steps_per_epoch + int(max_steps // num_update_steps_per_epoch > 0)
             num_train_samples = max_steps * training_args.per_device_train_batch_size
         else:
-            num_train_epochs = training_args.num_train_epochs
+            num_train_epochs = int(training_args.num_train_epochs)
             max_steps = math.ceil(num_train_epochs * num_update_steps_per_epoch)
             num_train_samples = len(train_dataloader) * training_args.per_device_train_batch_size * num_train_epochs
 
@@ -962,8 +1011,9 @@ def train_fn(
             f'  Number of trainable parameters = {get_num_trainable_parameters(text_encoder.get_input_embeddings())}'
         )
 
-        start_time = time.time()
         global_step = 0
+        epochs_trained = 0
+        steps_trained_in_current_epoch = 0
         skip_first_batches = False
 
         if training_args.resume_from_checkpoint is not None:
@@ -983,13 +1033,13 @@ def train_fn(
 
         for _ in range(epochs_trained, num_train_epochs):
             if skip_first_batches:
-                train_dataloader = accelerate.skip_first_batches(epochs_trained, steps_trained_in_current_epoch)
+                train_dataloader = accelerate.skip_first_batches(train_dataloader, steps_trained_in_current_epoch)
                 skip_first_batches = False
 
             text_encoder.train()
             for batch in train_dataloader:
                 with accelerator.accumulate(text_encoder):
-                    pixel_values = batch['input_ids'].to(dtype=weight_dtype)
+                    pixel_values = batch['pixel_values'].to(dtype=weight_dtype)
                     input_ids = batch['input_ids']
                     # Convert the images into latent space
                     latents = vae.encode(pixel_values).latent_dist.sample().detach()
@@ -1033,13 +1083,7 @@ def train_fn(
                     progress_bar.update(1)
                     global_step += 1
                 
-                    maybe_save(
-                        training_args, 
-                        accelerator, 
-                        global_step, 
-                        num_update_steps_per_epoch
-                    )
-                    maybe_log(
+                    maybe_log_or_save(
                         training_args, 
                         accelerator, 
                         global_step, 
@@ -1050,23 +1094,16 @@ def train_fn(
 
             accelerator.wait_for_everyone()
 
-        # Save a final checkpoint
-        maybe_save(
-            training_args, 
-            accelerator, 
-            global_step, 
-            num_update_steps_per_epoch,
-            force_save=True
-        )
-        # Log a final time
-        maybe_log(
+        # Log and save a final time
+        maybe_log_or_save(
             training_args, 
             accelerator, 
             global_step, 
             metrics, 
             progress_bar, 
             num_update_steps_per_epoch,
-            force_log=True
+            force_log=True,
+            force_save=True
         )
         # Save a fine-tuned stable-diffusion pipeline
         save_pipeline(
@@ -1077,6 +1114,8 @@ def train_fn(
             unet,
             tokenizer
         )
+
+    _train_fn()
 
 
 def main() -> None:
