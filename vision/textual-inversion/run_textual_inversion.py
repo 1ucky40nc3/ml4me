@@ -207,21 +207,10 @@ class DataArguments:
         Raise:
             ValueError: The arguments don't meet expectations.
         '''
-        if self.initializer_token is None:
-            raise ValueError(
-                f"The `initializer_token` can't be `None`!"
-                ' You have to set a `--initializert_token` argument.'
-            )
         if self.learnable_concept not in LEARNABLE_CONCEPTS:
             raise ValueError(
                 f'The `learnable_concept` has to be one of {LEARNABLE_CONCEPTS}!'
                 f' "{self.learnable_concept}" not in {LEARNABLE_CONCEPTS}'
-            )
-        if (os.path.isdir(self.data_output_dir) and len(os.listdir(self.data_output_dir)) > 0) and not self.overwrite_data_output_dir:
-            raise ValueError(
-                f'The `data_output_dir` exists and is not empty!'
-                ' Set a different `data_output_dir` of use `--overwrite_data_output_dir`!'
-                f' Directory: {self.data_output_dir}'
             )
             
 
@@ -331,6 +320,12 @@ def load_tokenizer(
     Raises:
         ValueError: The `placeholder_token` or `initializer_token` args are invalid.
     '''
+    if data_args.initializer_token is None:
+        raise ValueError(
+            f"The `initializer_token` can't be `None`!"
+            ' You have to set a `--initializert_token` argument.'
+        )
+
     tokenizer = transformers.CLIPTokenizer.from_pretrained(
         model_args.model_name_or_path,
         subfolder='tokenizer',
@@ -516,8 +511,21 @@ def create_data(data_args: DataArguments) -> None:
         data_args: A `DataArguments` object.
 
     Returns:
-        The path to the dataset directory. 
+        The path to the dataset directory.
+    
+    Raises:
+        ValueError: Overwrite or create new `data_args.data_output_dir`.
     '''
+    if (
+        os.path.isdir(data_args.data_output_dir) 
+        and len(os.listdir(data_args.data_output_dir)) > 0
+    ) and not data_args.overwrite_data_output_dir:
+        raise ValueError(
+            f'The `data_output_dir` exists and is not empty!'
+            ' Set a different `data_output_dir` of use `--overwrite_data_output_dir`!'
+            f' Directory: {data_args.data_output_dir}'
+        )
+
     if data_args.overwrite_data_output_dir and os.path.exists(data_args.data_output_dir):
         shutil.rmtree(data_args.data_output_dir)
     os.makedirs(data_args.data_output_dir, exist_ok=True)
