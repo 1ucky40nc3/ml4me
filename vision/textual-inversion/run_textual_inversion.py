@@ -11,13 +11,15 @@ import os
 import sys
 import glob
 import math
-import time
+import json
 import shutil
 import random
+import logging
 import functools
 from dataclasses import (
     dataclass,
-    field
+    field,
+    asdict
 )
 
 import numpy as np
@@ -680,7 +682,7 @@ def get_num_trainable_parameters(models: Union[torch.nn.Module, List[torch.nn.Mo
         The total number of trainable parameters.
     '''
     if not isinstance(models, (list, tuple)):
-        models = list(models)
+        models = [models]
 
     num_trainable_parameters = 0
     for model in models:
@@ -845,6 +847,8 @@ def convert_to_primitives(**kwargs) -> Dict[str, Any]:
     for key, value in kwargs.items():
         if isinstance(value, torch.Tensor):
             kwargs[key] = value.detach().cpu().item()
+        elif isinstance(value, (list, tuple, dict)):
+            kwargs[key] = json.dumps(value)
     return kwargs
 
 
@@ -941,6 +945,29 @@ def train_fn(
         log_with=training_args.report_to,
         logging_dir=training_args.logging_dir
     )
+
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+    logger.info(accelerator.state, main_process_only=False)
+    if accelerator.is_local_main_process:
+        datasets.utils.logging.set_verbosity_warning()
+        transformers.utils.logging.set_verbosity_info()
+    else:
+        datasets.utils.logging.set_verbosity_error()
+        transformers.utils.logging.set_verbosity_error()
+
+    if training_args.report_to is not None:
+        config = {
+            **asdict(model_args),
+            **asdict(data_args),
+            **asdict(training_args)
+        }
+        config = convert_to_primitives(**config)
+        accelerator.init_trackers(training_args.run_name, config)
+
 
     @accelerate.utils.find_executable_batch_size(starting_batch_size=training_args.per_device_train_batch_size)
     def _train_fn(batch_size: int) -> None:
@@ -1049,7 +1076,7 @@ def train_fn(
                     timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (batch_size,), device=latents.device).long()
                     noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
                     # Compute the text embedding
-                    (encoder_hidden_states, *_) = text_encoder(input_ids)
+                    encoder_hidden_states = text_encoder(input_ids).last_hidden_state
                     encoder_hidden_states = encoder_hidden_states.to(dtype=weight_dtype)
                     # Predict the noise
                     noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
