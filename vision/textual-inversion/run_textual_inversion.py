@@ -264,6 +264,31 @@ class InferenceArguments:
             'help': 'The number of samples to generate.'
         }
     )
+    apply_token_merging: bool = field(
+        default=False,
+        metadata={
+            'help': 'Whether to apply token merging (ToMe) (see https://github.com/dbolya/tomesd).'
+        }
+    )
+    tome_ratio: float = field(
+        default=0.5,
+        metadata={
+            'help': (
+                'The ratio of tokens to merge during ToMe.'
+                ' This only applies if `apply_token_merging == True`.'
+            )
+        }
+    )
+    tome_max_downsample: int = field(
+        default=1,
+        metadata={
+            'help': (
+                'Only apply ToMe with layers'
+                ' that do less or equal than this amount of downsampling.'
+                ' This value should be one of [1, 2, 4, or 8].'
+            )
+        }
+    )
 
 
 def get_mixed_precision(training_args: transformers.TrainingArguments) -> str:
@@ -839,12 +864,14 @@ def save_pipeline(
 
 
 def load_pipeline(
+    inference_args: InferenceArguments,
     training_args: transformers.TrainingArguments,
     accelerator: accelerate.Accelerator,
 ) -> diffusers.StableDiffusionPipeline:
     '''Create and save a `diffusers.StableDiffusionPipeline`.
 
     Args:
+        inference_args: A `InferenceArguments` object.
         training_args: A `transformers.TrainingArguments` object.
         accelerator: Our current accelerator object.
 
@@ -856,11 +883,28 @@ def load_pipeline(
         subfolder='scheduler'
     )
     weight_dtype = get_weight_dtype(accelerator.mixed_precision)
-    return diffusers.StableDiffusionPipeline.from_pretrained(
+    pipeline = diffusers.StableDiffusionPipeline.from_pretrained(
         training_args.output_dir,
         scheduler=noise_scheduler,
         torch_dtype=weight_dtype,
     ).to(accelerator.device)
+
+    if inference_args.do_inference:
+        try:
+            import tomesd
+            
+            tomesd.apply_patch(
+                pipeline, 
+                ratio=inference_args.tome_ratio,
+                max_downsample=inference_args.tome_max_downsample
+            )
+        except ImportError as e:
+            raise ImportError(
+                f'{e.__class__.__name__}: If want to apply token merging (ToMe)'
+                ' follow the installation instructions from "https://github.com/dbolya/tomesd".'
+            )
+
+    return pipeline
 
 
 def get_logging_steps(
@@ -1283,7 +1327,11 @@ def inference_fn(
     # Load the prompts from a text if necessary
     prompts = load_prompts(inference_args)
 
-    pipeline = load_pipeline(training_args, accelerator)
+    pipeline = load_pipeline(
+        inference_args,
+        training_args, 
+        accelerator
+    )
     outputs = pipeline(
         prompts,
         inference_args.height,
