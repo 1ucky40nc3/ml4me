@@ -4,7 +4,8 @@ from typing import (
     Dict,
     Tuple,
     Union,
-    Optional
+    Optional,
+    Callable
 )
 
 import os
@@ -48,6 +49,7 @@ logger = accelerate.logging.get_logger(__name__)
 TRAINING_ARGS_NAME = 'training_args.bin'
 TRAINER_STATE_NAME = 'trainer_state.json'
 LEARNABLE_CONCEPTS = ['object', 'style']
+KNOCKKNOCK_DISCORD_WEBHOOK_URL_ENV_VARIABLE = 'KNOCKKNOCK_DISCORD_WEBHOOK_URL'
 
 
 @dataclass
@@ -286,6 +288,34 @@ class InferenceArguments:
                 'Only apply ToMe with layers'
                 ' that do less or equal than this amount of downsampling.'
                 ' This value should be one of [1, 2, 4, or 8].'
+            )
+        }
+    )
+
+
+@dataclass
+class KnockKnockArguments:
+    knockknock: bool = field(
+        default=False,
+        metadata={
+            'help': (
+                'Whether to be notified by `knockknock`.'
+                ' For more information see: "https://github.com/huggingface/knockknock"'
+            )
+        }
+    )
+    knockknock_on_discord: bool = field(
+        default=False,
+        metadata={
+            'help': 'Whether send `knockknock` notifications on discord.'
+        }
+    )
+    knockknock_discord_webhook_url: Optional[str] = field(
+        default=None,
+        metadata={
+            'help': (
+                'A discord webhook url. See "https://github.com/huggingface/knockknock" for instructions.'
+                ' The webhook url value can be specified w/ this arg or the `KNOCKKNOCK_DISCORD_WEBHOOK_URL` env variable.'
             )
         }
     )
@@ -1343,35 +1373,70 @@ def inference_fn(
     save_outputs(training_args, outputs)
 
 
+def maybe_knockknock(knockknock_args: KnockKnockArguments) -> Callable:
+    '''Return a decorator that does a `knockknock` setup.
+
+    Args:
+        knockknock_args: A `KnockKnockArguments``object.
+
+    Returns:
+        A function decorator for a `knockknock` setup based
+        on the provided `KnockKnockArguments` object.
+    '''
+    def decorator(func: Callable) -> Callable:
+        if knockknock_args.knockknock_on_discord:
+            import knockknock
+            
+            # Read the webhook url from the args or environment variables
+            webhook_url = knockknock_args.knockknock_discord_webhook_url
+            if webhook_url is None:
+                webhook_url = os.environ[KNOCKKNOCK_DISCORD_WEBHOOK_URL_ENV_VARIABLE]
+
+            func = knockknock.discord_sender(webhook_url)(func)
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+        
+        return wrapper
+    return decorator
+
+
 def main() -> None:
     parser = transformers.HfArgumentParser((
         ModelArguments, 
         DataArguments, 
         InferenceArguments,
+        KnockKnockArguments,
         transformers.TrainingArguments
     ))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, inference_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, inference_args, knockknock_args, training_args \
+            = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, inference_args, training_args = parser.parse_args_into_dataclasses()
+        model_args, data_args, inference_args, knockknock_args, training_args \
+            = parser.parse_args_into_dataclasses()
 
-    if training_args.do_train:
-        train_fn(
-            model_args, 
-            data_args, 
-            training_args
-        )
+    @maybe_knockknock(knockknock_args)
+    def _main():
+        if training_args.do_train:
+            train_fn(
+                model_args, 
+                data_args, 
+                training_args
+            )
 
-    if inference_args.do_inference:
-        inference_fn(
-            model_args, 
-            data_args, 
-            inference_args, 
-            training_args
-        )
+        if inference_args.do_inference:
+            inference_fn(
+                model_args, 
+                data_args, 
+                inference_args, 
+                training_args
+            )
 
+    _main()
 
 
 
