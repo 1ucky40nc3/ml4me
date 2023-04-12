@@ -295,15 +295,6 @@ class InferenceArguments:
 
 @dataclass
 class KnockKnockArguments:
-    knockknock: bool = field(
-        default=False,
-        metadata={
-            'help': (
-                'Whether to be notified by `knockknock`.'
-                ' For more information see: "https://github.com/huggingface/knockknock"'
-            )
-        }
-    )
     knockknock_on_discord: bool = field(
         default=False,
         metadata={
