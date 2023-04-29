@@ -224,6 +224,15 @@ class InferenceArguments:
             'help': 'Whether to do inference.'
         }
     )
+    inference_output_dir: Optional[str] = field(
+        default=None,
+        metadata={
+            'help': (
+                'An optional output directory for inference results.'
+                ' We append this directory to the training arguments `--output_directory`.'
+            )
+        }
+    )
     prompt_or_path_to_prompts: Optional[str] = field(
         default=None,
         metadata={
@@ -1285,12 +1294,14 @@ def load_prompts(inferece_args: InferenceArguments) -> List[str]:
 
 def save_outputs(
     training_args: transformers.TrainingArguments,
+    inference_args: InferenceArguments,
     output: diffusers.pipelines.stable_diffusion.StableDiffusionPipelineOutput
 ) -> None:
     '''Save the stable-diffusion pipeline outputs.
     
     Args:
         training_args: A `transformers.TrainingArguments` object.
+        inference_args: A `InferenceArguments` object.
         output: A stable-diffusion pipeline output.
 
     Raises:
@@ -1298,7 +1309,11 @@ def save_outputs(
     '''
     for image in output.images:
         filename = f'{str(uuid.uuid4())}.png'
-        path = os.path.join(training_args.output_dir, filename)
+        path = [training_args.output_dir]
+        if inference_args.inference_output_dir is not None:
+            path.append(inference_args.inference_output_dir)
+        path = os.path.join(*[*path, filename])
+
         if isinstance(image, PIL.Image.Image):
             image.save(path)
         elif isinstance(image, np.ndarray):
@@ -1364,7 +1379,7 @@ def inference_fn(
         num_images_per_prompt=inference_args.num_images_per_prompt
     )
 
-    save_outputs(training_args, outputs)
+    save_outputs(training_args, inference_args, outputs)
 
 
 def maybe_knockknock(knockknock_args: KnockKnockArguments) -> Callable:
