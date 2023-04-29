@@ -1191,7 +1191,7 @@ def train_fn(
                     latents = latents * 0.18215
                     # Sample and add noise to the latents
                     noise = torch.randn_like(latents)
-                    timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (batch_size,), device=latents.device).long()
+                    timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (pixel_values.shape[0],), device=latents.device).long()
                     noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
                     # Compute the text embedding
                     encoder_hidden_states = text_encoder(input_ids).last_hidden_state
@@ -1334,13 +1334,15 @@ def inference_fn(
         datasets.utils.logging.set_verbosity_error()
         transformers.utils.logging.set_verbosity_error()
 
+    config = {
+        **asdict(model_args),
+        **asdict(data_args),
+        **asdict(training_args)
+    }
+    config = convert_to_primitives(**config)
+    logger.info(f'Config: \n{json.dumps(config, indent=2)}')
+
     if training_args.report_to is not None:
-        config = {
-            **asdict(model_args),
-            **asdict(data_args),
-            **asdict(training_args)
-        }
-        config = convert_to_primitives(**config)
         accelerator.init_trackers(training_args.run_name, config)
 
     accelerate.utils.set_seed(training_args.seed)
@@ -1358,7 +1360,8 @@ def inference_fn(
         inference_args.height,
         inference_args.width,
         inference_args.num_inference_steps,
-        inference_args.guidance_scale
+        inference_args.guidance_scale,
+        num_images_per_prompt=inference_args.num_images_per_prompt
     )
 
     save_outputs(training_args, outputs)
