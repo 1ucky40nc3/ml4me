@@ -1312,7 +1312,10 @@ def save_outputs(
         path = [training_args.output_dir]
         if inference_args.inference_output_dir is not None:
             path.append(inference_args.inference_output_dir)
-        path = os.path.join(*[*path, filename])
+        path = os.path.join(path)
+        # Create the output directory if necessary
+        os.makedirs(path, exist_ok=True)
+        path = os.path.join(path, filename)
 
         if isinstance(image, PIL.Image.Image):
             image.save(path)
