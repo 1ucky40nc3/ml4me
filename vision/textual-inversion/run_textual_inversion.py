@@ -303,6 +303,22 @@ class InferenceArguments:
 
 
 @dataclass
+class SweepArguments:
+    do_sweep: bool = field(
+        default=False,
+        metadata={
+            'help': 'Whether to do a hyperparameter sweep with wandb.'
+        }
+    )
+    sweep_config_path: str = field(
+        default='sweep.json',
+        metadata={
+            'help': 'A JSON config file for wandb hyperparameter sweeps.'
+        }
+    )
+
+
+@dataclass
 class KnockKnockArguments:
     knockknock_on_discord: bool = field(
         default=False,
@@ -1332,6 +1348,7 @@ def inference_fn(
     inference_args: InferenceArguments,
     training_args: transformers.TrainingArguments
 ) -> None:
+    '''TODO: add docstring'''
     accelerator = accelerate.Accelerator(
         mixed_precision=get_mixed_precision(training_args),
         gradient_accumulation_steps=training_args.gradient_accumulation_steps,
@@ -1385,6 +1402,11 @@ def inference_fn(
     save_outputs(training_args, inference_args, outputs)
 
 
+def sweep_fn():
+    '''TODO: add docstring'''
+    pass
+
+
 def maybe_knockknock(knockknock_args: KnockKnockArguments) -> Callable:
     '''Return a decorator that does a `knockknock` setup.
 
@@ -1419,21 +1441,24 @@ def main() -> None:
         ModelArguments, 
         DataArguments, 
         InferenceArguments,
+        SweepArguments,
         KnockKnockArguments,
         transformers.TrainingArguments
     ))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, inference_args, knockknock_args, training_args \
+        model_args, data_args, inference_args, sweep_args, knockknock_args, training_args \
             = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, inference_args, knockknock_args, training_args \
+        model_args, data_args, inference_args, sweep_args, knockknock_args, training_args \
             = parser.parse_args_into_dataclasses()
 
     @maybe_knockknock(knockknock_args)
     def _main():
-        if training_args.do_train:
+        if sweep_args.do_sweep:
+            sweep_fn()
+        elif training_args.do_train:
             train_fn(
                 model_args, 
                 data_args, 
@@ -1441,6 +1466,7 @@ def main() -> None:
             )
 
         if inference_args.do_inference:
+            # TODO: use best sweep config
             inference_fn(
                 model_args, 
                 data_args, 
