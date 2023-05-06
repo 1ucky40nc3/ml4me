@@ -14,6 +14,7 @@ import glob
 import math
 import json
 import uuid
+import copy
 import shutil
 import random
 import logging
@@ -44,6 +45,9 @@ import PIL
 
 
 logger = accelerate.logging.get_logger(__name__)
+
+
+WandbConfig = Any
 
 
 TRAINING_ARGS_NAME = 'training_args.bin'
@@ -310,10 +314,22 @@ class SweepArguments:
             'help': 'Whether to do a hyperparameter sweep with wandb.'
         }
     )
-    sweep_config_path: str = field(
-        default='sweep.json',
+    sweep_config_path: Optional[str] = field(
+        default=None,
         metadata={
-            'help': 'A JSON config file for wandb hyperparameter sweeps.'
+            'help': 'The path to a JSON config file for wandb hyperparameter sweeps.'
+        }
+    )
+    sweep_count: Optional[int] = field(
+        default=None,
+        metadata={
+            'help': 'The number of runs per sweep.'
+        }
+    )
+    sweep_project: Optional[str] = field(
+        default=None,
+        metadata={
+            'help': 'The name of a wandb project where we store the sweep logs.'
         }
     )
 
@@ -1348,7 +1364,6 @@ def inference_fn(
     inference_args: InferenceArguments,
     training_args: transformers.TrainingArguments
 ) -> None:
-    '''TODO: add docstring'''
     accelerator = accelerate.Accelerator(
         mixed_precision=get_mixed_precision(training_args),
         gradient_accumulation_steps=training_args.gradient_accumulation_steps,
@@ -1402,9 +1417,71 @@ def inference_fn(
     save_outputs(training_args, inference_args, outputs)
 
 
-def sweep_fn():
-    '''TODO: add docstring'''
-    pass
+def load_sweep_config(sweep_args: SweepArguments) -> Dict[str, Any]:
+    '''Load the wandb sweep config from a JSON file.
+    
+    Args:
+        sweep_args: A `SweepArguments` object.
+    
+    Returns:
+        A dictionary of the JSON wandb sweep configuration.
+
+    Raises:
+        FileNotFoundError: The path specified with the `--sweep_config_path` arg.
+    '''
+    with open(sweep_args.sweep_config_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def update_args(config: WandbConfig, args: Tuple[dataclass]) -> List[dataclass]:
+    '''Update a dataclasses with settings from a wandb config.
+
+    Args:
+        config: The wandb config of type `wandb.sdk.wandb_config.Config`.
+        args: A tuple of dataclasses.
+
+    Returns:
+        A list of the updated dataclass copies.
+    '''
+    updated = []
+    for arg in args:
+        tmp = copy.deepcopy(arg)
+        for key, value in config.items():
+            if key in dir(tmp):
+                setattr(tmp, key, value)
+        updated.append(tmp)
+    return updated
+
+
+def sweep_fn(
+    model_args: ModelArguments,
+    data_args: DataArguments,
+    sweep_args: SweepArguments,
+    training_args: transformers.TrainingArguments
+) -> None:
+    import wandb
+
+    config = load_sweep_config(sweep_args)
+    sweep_id = wandb.sweep(
+        sweep=config, 
+        project=sweep_args.sweep_project
+    )
+    logger.info(f'Sweeping with config: \n{json.dumps(config, indent=2)}')
+
+    def _sweep_fn():
+        run = wandb.init()
+        
+        # Update the args with the current sweep run config
+        _model_args, _data_args, _training_args = \
+            update_args(wandb.config, (model_args, data_args, training_args))
+
+        train_fn(
+            _model_args,
+            _data_args,
+            _training_args
+        )
+
+    wandb.agent(sweep_id, function=_sweep_fn, count=sweep_args.sweep_count)
 
 
 def maybe_knockknock(knockknock_args: KnockKnockArguments) -> Callable:
@@ -1457,22 +1534,26 @@ def main() -> None:
     @maybe_knockknock(knockknock_args)
     def _main():
         if sweep_args.do_sweep:
-            sweep_fn()
-        elif training_args.do_train:
-            train_fn(
+            sweep_fn(
                 model_args, 
-                data_args, 
+                data_args,
+                sweep_args,
                 training_args
             )
-
-        if inference_args.do_inference:
-            # TODO: use best sweep config
-            inference_fn(
-                model_args, 
-                data_args, 
-                inference_args, 
-                training_args
-            )
+        else:
+            if training_args.do_train:
+                train_fn(
+                    model_args, 
+                    data_args, 
+                    training_args
+                )
+            if inference_args.do_inference:
+                inference_fn(
+                    model_args, 
+                    data_args, 
+                    inference_args, 
+                    training_args
+                )
 
     _main()
 
