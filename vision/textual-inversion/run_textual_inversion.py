@@ -326,12 +326,6 @@ class SweepArguments:
             'help': 'The number of runs per sweep.'
         }
     )
-    sweep_project: Optional[str] = field(
-        default=None,
-        metadata={
-            'help': 'The name of a wandb project where we store the sweep logs.'
-        }
-    )
 
 
 @dataclass
@@ -1464,7 +1458,7 @@ def sweep_fn(
     config = load_sweep_config(sweep_args)
     sweep_id = wandb.sweep(
         sweep=config, 
-        project=sweep_args.sweep_project
+        project=training_args.run_name
     )
     logger.info(f'Sweeping with config: \n{json.dumps(config, indent=2)}')
 
