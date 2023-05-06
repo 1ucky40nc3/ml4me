@@ -1468,6 +1468,8 @@ def sweep_fn(
         # Update the args with the current sweep run config
         _model_args, _data_args, _training_args = \
             update_args(wandb.config, (model_args, data_args, training_args))
+        _training_args.output_dir = os.path.join(
+            _training_args.output_dir, f'{run.name}_{run.id}')
 
         train_fn(
             _model_args,
