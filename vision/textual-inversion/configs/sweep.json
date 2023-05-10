@@ -13,13 +13,6 @@
                 64
             ]
         },
-        "num_train_epochs": {
-            "values": [
-                5, 
-                10, 
-                15
-            ]
-        },
         "learning_rate": {
             "max": 0.1, 
             "min": 0.0001
