@@ -52,7 +52,6 @@ WandbConfig = Any
 
 TRAINING_ARGS_NAME = 'training_args.bin'
 TRAINER_STATE_NAME = 'trainer_state.json'
-LEARNABLE_CONCEPTS = ['object', 'style']
 KNOCKKNOCK_DISCORD_WEBHOOK_URL_ENV_VARIABLE = 'KNOCKKNOCK_DISCORD_WEBHOOK_URL'
 
 
@@ -152,12 +151,6 @@ class DataArguments:
             )
         }
     )
-    learnable_concept: str = field(
-        default='object',
-        metadata={
-            'help': f'A property to learn from the data. This can be one of {LEARNABLE_CONCEPTS}."'
-        }
-    )
     size: int = field(
         default=512,
         metadata={
@@ -206,18 +199,6 @@ class DataArguments:
             'help': 'The number of workers during preprocessing.'
         }
     )
-
-    def __post_init__(self) -> None:
-        '''Check if the arguments meet expectations.
-        
-        Raise:
-            ValueError: The arguments don't meet expectations.
-        '''
-        if self.learnable_concept not in LEARNABLE_CONCEPTS:
-            raise ValueError(
-                f'The `learnable_concept` has to be one of {LEARNABLE_CONCEPTS}!'
-                f' "{self.learnable_concept}" not in {LEARNABLE_CONCEPTS}'
-            )
             
 
 @dataclass
