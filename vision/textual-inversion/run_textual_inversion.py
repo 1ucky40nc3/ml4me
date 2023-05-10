@@ -199,6 +199,22 @@ class DataArguments:
             'help': 'The number of workers during preprocessing.'
         }
     )
+
+
+@dataclass
+class OurTrainingArguments:
+    do_not_force_save: bool = field(
+        default=False,
+        metadata={
+            'help': 'Whether to not force a save on the end of a training run.'
+        }
+    )
+    do_not_save_pipeline: bool = field(
+        default=False,
+        metadata={
+            'help': 'Whether to not save the diffusion pipeline after a training run.'
+        }
+    )
             
 
 @dataclass
@@ -1072,6 +1088,7 @@ def maybe_log_or_save(
 def train_fn(
     model_args: ModelArguments,
     data_args: DataArguments,
+    our_training_args: OurTrainingArguments,
     training_args: transformers.TrainingArguments
 ) -> None:
     accelerator = accelerate.Accelerator(
@@ -1264,18 +1281,19 @@ def train_fn(
             progress_bar, 
             num_update_steps_per_epoch,
             force_log=True,
-            force_save=True
+            force_save=not our_training_args.do_not_force_save
         )
-        # Save a fine-tuned stable-diffusion pipeline
-        save_pipeline(
-            model_args,
-            training_args,
-            accelerator,
-            text_encoder,
-            vae,
-            unet,
-            tokenizer
-        )
+        if not our_training_args.do_not_save_pipeline:
+            # Save a fine-tuned stable-diffusion pipeline
+            save_pipeline(
+                model_args,
+                training_args,
+                accelerator,
+                text_encoder,
+                vae,
+                unet,
+                tokenizer
+            )
 
     _train_fn()
 
@@ -1432,6 +1450,7 @@ def sweep_fn(
     model_args: ModelArguments,
     data_args: DataArguments,
     sweep_args: SweepArguments,
+    our_training_args: OurTrainingArguments,
     training_args: transformers.TrainingArguments
 ) -> None:
     import wandb
@@ -1455,6 +1474,7 @@ def sweep_fn(
         train_fn(
             _model_args,
             _data_args,
+            our_training_args,
             _training_args
         )
 
@@ -1497,15 +1517,16 @@ def main() -> None:
         InferenceArguments,
         SweepArguments,
         KnockKnockArguments,
+        OurTrainingArguments,
         transformers.TrainingArguments
     ))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, inference_args, sweep_args, knockknock_args, training_args \
+        model_args, data_args, inference_args, sweep_args, knockknock_args, our_training_args, training_args \
             = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, inference_args, sweep_args, knockknock_args, training_args \
+        model_args, data_args, inference_args, sweep_args, knockknock_args, our_training_args, training_args \
             = parser.parse_args_into_dataclasses()
 
     @maybe_knockknock(knockknock_args)
@@ -1515,13 +1536,15 @@ def main() -> None:
                 model_args, 
                 data_args,
                 sweep_args,
+                our_training_args,
                 training_args
             )
         else:
             if training_args.do_train:
                 train_fn(
                     model_args, 
-                    data_args, 
+                    data_args,
+                    our_training_args,
                     training_args
                 )
             if inference_args.do_inference:
