@@ -23,6 +23,27 @@
                 100,
                 150
             ]
+        },
+        "rand_augment_num_ops": {
+            "values": [
+                0,
+                2,
+                4
+            ]
+        },
+        "rand_augment_magnitude": {
+            "values": [
+                5,
+                9,
+                15
+            ]
+        },
+        "rand_augment_num_magnitude_bins": {
+            "values": [
+                20,
+                31,
+                40
+            ]
         }
     }
 }
