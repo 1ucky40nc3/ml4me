@@ -169,6 +169,24 @@ class DataArguments:
             'help': 'Whether to crop images in the center during training.'
         }
     )
+    rand_augment_num_ops: Optional[int] = field(
+        default=2,
+        metadata={
+            'help': 'Number of random augmentation transforms during training.'
+        }
+    )
+    rand_augment_magnitude: Optional[int] = field(
+        default=9,
+        metadata={
+            'help': 'The magnitude of random augmentation transforms during training.'
+        }
+    )
+    rand_augment_num_magnitude_bins: Optional[int] = field(
+        default=31,
+        metadata={
+            'help': 'The number magnitude values of random augmentation transforms during training.'
+        }
+    )
     num_repeats: int = field(
         default=100,
         metadata={
@@ -723,6 +741,11 @@ def load_data(
             self.transforms = torch.nn.Sequential(
                 torchvision.transforms.RandomResizedCrop(data_args.size, antialias=True),
                 torchvision.transforms.RandomHorizontalFlip(data_args.flip_p),
+                torchvision.transforms.RandAugment(
+                    data_args.rand_augment_num_ops, 
+                    data_args.rand_augment_magnitude, 
+                    data_args.rand_augment_num_magnitude_bins
+                ),
                 torchvision.transforms.ConvertImageDtype(torch.float),
             )
 
