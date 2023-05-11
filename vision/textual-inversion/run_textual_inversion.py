@@ -662,20 +662,17 @@ def create_data(data_args: DataArguments) -> None:
     )
 
 
-def read_image(path: str) -> torch.Tensor:
+def read_image(path: str) -> PIL.Image.Image:
     '''Read a image file.
 
     Args:
         path: The image file path.
     
     Returns:
-        A `torch.Tensor` with the RGB image pixel data.
+        A `PIL.Image.Image` with the RGB image pixel data.
         The pixel values are from 0 to 255 in the `torch.uint8` format.
     '''
-    return torchvision.io.read_image(
-        path, 
-        mode=torchvision.io.ImageReadMode.RGB
-    )
+    return PIL.Image.open(path).convert('RGB')
 
 
 def load_data(
@@ -740,19 +737,19 @@ def load_data(
             super().__init__()
             self.transforms = torch.nn.Sequential(
                 torchvision.transforms.RandomResizedCrop(data_args.size, antialias=True),
-                torchvision.transforms.RandomHorizontalFlip(data_args.flip_p),
                 torchvision.transforms.RandAugment(
                     data_args.rand_augment_num_ops, 
                     data_args.rand_augment_magnitude, 
                     data_args.rand_augment_num_magnitude_bins
                 ),
-                torchvision.transforms.ConvertImageDtype(torch.float),
+                torchvision.transforms.ToTensor(),
             )
 
         def forward(self, x) -> torch.Tensor:
             with torch.no_grad():
                 x = self.transforms(x)
-                x = x / 127.5 - 1.0
+                # Normalize to [-1, 1]
+                x = x * 2 - 1
             return x
 
     def transform_fn(examples, transform):
