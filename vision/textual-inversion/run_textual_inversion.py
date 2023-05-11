@@ -732,10 +732,9 @@ def load_data(
     
     column_names = dataset['train'].column_names
 
-    class TrainTransform(torch.nn.Module):
+    class TrainTransform:
         def __init__(self):
-            super().__init__()
-            self.transforms = torch.nn.Sequential(
+            self.transforms = torchvision.transforms.Compose([
                 torchvision.transforms.RandomResizedCrop(data_args.size, antialias=True),
                 torchvision.transforms.RandAugment(
                     data_args.rand_augment_num_ops, 
@@ -743,9 +742,9 @@ def load_data(
                     data_args.rand_augment_num_magnitude_bins
                 ),
                 torchvision.transforms.ToTensor(),
-            )
+            ])
 
-        def forward(self, x) -> torch.Tensor:
+        def forward(self, x: PIL.Image.Image) -> torch.Tensor:
             with torch.no_grad():
                 x = self.transforms(x)
                 # Normalize to [-1, 1]
@@ -760,7 +759,7 @@ def load_data(
         ]
         return examples
     
-    train_transform = torch.jit.script(TrainTransform())
+    train_transform = TrainTransform()
     train_transform_fn = functools.partial(transform_fn, transform=train_transform)
     
     def tokenize_fn(examples):
