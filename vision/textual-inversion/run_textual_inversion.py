@@ -744,7 +744,7 @@ def load_data(
                 torchvision.transforms.ToTensor(),
             ])
 
-        def forward(self, x: PIL.Image.Image) -> torch.Tensor:
+        def __call__(self, x: PIL.Image.Image) -> torch.Tensor:
             with torch.no_grad():
                 x = self.transforms(x)
                 # Normalize to [-1, 1]
